@@ -446,11 +446,11 @@ def extract_seat_metrics(self, sb, performances):
             all_shows = []
             for i, (url, category) in enumerate(PAGES):
                 self.custom_logger.info(f"[Listing] {category}: {url}")
-                driver.get(url)
-                accept_cookies(driver, xpath=COOKIE_BTN_XPATH)
-                self._scroll_to_load_all(driver)
+                sb.open(url)
+                accept_cookies(sb, xpath=COOKIE_BTN_XPATH)
+                human_scroll(sb)
 
-                shows = self._extract_event_list(driver, category)
+                shows = self._extract_event_list(sb, category)
                 self.custom_logger.info(f"  → {len(shows)} show(s) found")
                 all_shows.extend(shows)
 
