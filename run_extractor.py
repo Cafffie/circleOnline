@@ -398,19 +398,23 @@ def extract_seat_metrics(self, sb, performances):
                 f"  No performances found for '{show['title']}', skipping"
             )
             return None
-            
+
         open_date, close_date = self._get_show_dates(sb)
 
         seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(self, sb, performances)
     
+        if (not open_date or not close_date) and performances:
+            try:
+                sorted_dates = sorted([p["date"] for p in performances])
+                open_date = sorted_dates[0]
+                close_date = sorted_dates[-1]
 
-        if performances:
-            sorted_dates = sorted([p["date"] for p in performances])
-            open_date = sorted_dates[0]
-            close_date = sorted_dates[-1]
-        else:
-            open_date = datetime.now().strftime("%Y-%m-%d")
-            close_date = datetime.now().strftime("%Y-%m-%d")
+            except Exception as e:
+                open_date = datetime.now().strftime("%Y-%m-%d")
+                close_date = datetime.now().strftime("%Y-%m-%d")
+                self.custom_logger.warning(
+                    f"Error deriving dates from performances: {e}"
+                )
 
         return {
             "title": show["title"],
@@ -434,24 +438,67 @@ def extract_seat_metrics(self, sb, performances):
             "scrape_datetime": get_scrape_datetime(),
         }
 
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        if not df.empty and "is_limited_run" in df.columns:
-            df["is_limited_run"] = None
-        if not df.empty and "capacity" in df.columns:
-            df["capacity"] = pd.to_numeric(df["capacity"], errors="coerce").astype(
-                "Int64"
-            )
-        return df
+    
+    def extract(self) -> bytes:
+        all_data = []
+        with SB(uc=True, headless=RUN_HEADLESS, rtf=True) as sb:
+        try:
+            all_shows = []
+            for i, (url, category) in enumerate(PAGES):
+                self.custom_logger.info(f"[Listing] {category}: {url}")
+                driver.get(url)
+                accept_cookies(driver, xpath=COOKIE_BTN_XPATH)
+                self._scroll_to_load_all(driver)
 
+                shows = self._extract_event_list(driver, category)
+                self.custom_logger.info(f"  → {len(shows)} show(s) found")
+                all_shows.extend(shows)
 
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        if not df.empty and "is_limited_run" in df.columns:
-            df["is_limited_run"] = None
-        if not df.empty and "capacity" in df.columns:
-            df["capacity"] = pd.to_numeric(df["capacity"], errors="coerce").astype(
-                "Int64"
-            )
-        return df
+            # Deduplicate by URL — a show listed under both categories should only be scraped once
+            seen_urls: set[str] = set()
+            deduped: list[dict] = []
+            for show in all_shows:
+                url = show["event_url"]
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    deduped.append(show)
+                else:
+                    self.custom_logger.info(
+                        f"  Skipping duplicate: {show['title']!r} (already queued)"
+                    )
+            all_shows = deduped
+
+            if self.show_count:
+                all_shows = all_shows[: self.show_count]
+                self.custom_logger.info(
+                    f"show_count={self.show_count}: limited to {len(all_shows)} show(s)"
+                )
+
+            for idx, show in enumerate(all_shows, 1):
+                self.custom_logger.info(
+                    f"[{idx}/{len(all_shows)}] [{show['category']}] {show['title']!r}"
+                )
+                try:
+                    record = self._scrape_show(driver, show)
+                    if record:
+                        all_data.append(record)
+                        self.log_record(record)
+                        self._log_show_summary(record)
+                except Exception as exc:
+                    self.custom_logger.error(f"  ✗ Error: {exc}", exc_info=True)
+
+                human_delay(*DELAY_BETWEEN_SHOWS)
+
+            self.custom_logger.info(f"Extraction complete — {len(all_data)} record(s)")
+
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+        return json.dumps(all_data, default=str).encode("utf-8")
+
 
     def _parse(self, raw: bytes) -> pd.DataFrame:
         data = json.loads(raw.decode("utf-8"))
@@ -460,6 +507,16 @@ def extract_seat_metrics(self, sb, performances):
             if df["capacity"].notna().any():
                 df["capacity"] = df["capacity"].astype(pd.Int64Dtype())
         self.custom_logger.info(f"Parsed {len(df)} record(s)")
+        return df
+
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not df.empty and "is_limited_run" in df.columns:
+            df["is_limited_run"] = None
+        if not df.empty and "capacity" in df.columns:
+            df["capacity"] = pd.to_numeric(df["capacity"], errors="coerce").astype(
+                "Int64"
+            )
         return df
 
 
