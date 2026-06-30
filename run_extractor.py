@@ -232,6 +232,7 @@ def _extract_performances(self, sb) -> list[dict]:
 def extract_seats(self, sb)-> tuple:
      """Extracts seats and pricing from the currently open SVG modal."""
 
+    max_capacity = None
     currency = None
     try:
         seats = sb.find_elements(By.CSS_SELECTOR, "div.SeatingArea img[class*='Seat'], rect.seat")
@@ -241,9 +242,12 @@ def extract_seats(self, sb)-> tuple:
         for seat in seats:
             tooltip = seat.get_attribute("tooltip") or seat.get_attribute("title") or ""
             
-            detected_currency = detect_currency(tooltip)
-            if detected_currency and currency is None:
-                currency = detected_currency
+            perf_capacity = len(seats) if seats else None
+            if max_capacity is None or perf_capacity > max_capacity:
+                max_capacity = perf_capacity
+            
+            if currency is None:
+                currency = get_currency_from_price(tooltip)
 
             if not tooltip:
                 continue
@@ -262,12 +266,10 @@ def extract_seats(self, sb)-> tuple:
     except Exception as e:
         self.custom_logger.debug(f"Seat canvas extraction subloop failure: {e}")
         break
-
-    capacity = len(seats) if seats else None
     
     self.custom_logger.info(
-            f" Total capacity: {capacity} seats ({len(seat_list)} priced)")
-    return seat_list, currency, capacity
+            f" Total capacity: {max_capacity} seats ({len(seat_list)} priced)")
+    return seat_list, currency, max_capacity
 
 
 def extract_seat_metrics(self, sb, performances):
@@ -306,7 +308,7 @@ def extract_seat_metrics(self, sb, performances):
                     venue_extracted = True
                 # ------------------------------------------------
                 sb.wait_for_element_present("div.SeatingArea img, rect.seat", timeout=12)
-                seat_list, currency, capacity = extract_seats(sb)
+                seat_list, currency, capacity = self.extract_seats(sb)
 
                 if seat_list:
                     seat_pricing[key] = seat_list  
@@ -349,7 +351,116 @@ def extract_seat_metrics(self, sb, performances):
     self.custom_logger.info(" Seat extraction flow processed")
     return seat_pricing, currency, venue_details
 
+ 
+ def _log_show_summary(self, record: dict) -> None:
+        seat_pricing = record.get("seat_pricing") or {}
+        perfs = record.get("upcoming_performances") or []
+        divider = "  " + "━" * 54
+        lines = [
+            divider,
+            f"  ✓  {record['title']}  [{record['category']}]",
+            f"     Venue    : {record['venue']}, {record['city']}, {record['country']}",
+            f"     Run      : {record['open_date']} → {record['close_date']}",
+            f"     Capacity : {record['capacity']}  |  Currency: {record['currency']}",
+            f"     Performances ({len(perfs)}):",
+        ]
+        for p in perfs:
+            key = f"{p['date']} {p['time']}"
+            seats = seat_pricing.get(key, [])
+            seat_label = (
+                f"{len(seats)} seats" if seats else "No seat map availabe or sold out"
+            )
+            lines.append(f"       • {key}  →  {seat_label}")
+        lines.append(divider)
+        self.custom_logger.info("\n".join(lines))
 
+
+    def _scrape_show(self, sb, show: dict) -> dict | None:
+        for attempt in range(1, 4):
+            try:
+                sb.open(show["event_url"])
+                break
+            except (TimeoutException, WebDriverException) as exc:
+                self.custom_logger.warning(
+                    f"  Load attempt {attempt}/3 failed for {show['title']!r}: "
+                    f"{type(exc).__name__}"
+                )
+                if attempt == 3:
+                    raise
+                human_delay(1.5, 3.0)
+        accept_cookies(sb, xpath=COOKIE_BTN_XPATH)
+        human_scroll(sb)
+
+        performances = self._extract_performances(sb)
+
+        if not performances:
+            self.custom_logger.warning(
+                f"  No performances found for '{show['title']}', skipping"
+            )
+            return None
+            
+        open_date, close_date = self._get_show_dates(sb)
+
+        seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(self, sb, performances)
+    
+
+        if performances:
+            sorted_dates = sorted([p["date"] for p in performances])
+            open_date = sorted_dates[0]
+            close_date = sorted_dates[-1]
+        else:
+            open_date = datetime.now().strftime("%Y-%m-%d")
+            close_date = datetime.now().strftime("%Y-%m-%d")
+
+        return {
+            "title": show["title"],
+            "venue_url": show["event_url"],
+            "category": standardize_category(show["category"]),
+            "venue": venue,
+            "address": venue_details["address"],
+            "city": venue_details["city"],
+            "country": normalize_country(venue_details["country"]),
+            "open_date": open_date,
+            "close_date": close_date,
+            "booking_start_date": open_date,
+            "booking_end_date": close_date,
+            "upcoming_performances": [
+                {"date": p["date"], "time": p["time"]} for p in performances
+            ],
+            "capacity": capacity,
+            "currency": currency,
+            "is_limited_run": None,
+            "seat_pricing": seat_pricing,
+            "scrape_datetime": get_scrape_datetime(),
+        }
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not df.empty and "is_limited_run" in df.columns:
+            df["is_limited_run"] = None
+        if not df.empty and "capacity" in df.columns:
+            df["capacity"] = pd.to_numeric(df["capacity"], errors="coerce").astype(
+                "Int64"
+            )
+        return df
+
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not df.empty and "is_limited_run" in df.columns:
+            df["is_limited_run"] = None
+        if not df.empty and "capacity" in df.columns:
+            df["capacity"] = pd.to_numeric(df["capacity"], errors="coerce").astype(
+                "Int64"
+            )
+        return df
+
+    def _parse(self, raw: bytes) -> pd.DataFrame:
+        data = json.loads(raw.decode("utf-8"))
+        df = pd.DataFrame(data)
+        if not df.empty and "capacity" in df.columns:
+            if df["capacity"].notna().any():
+                df["capacity"] = df["capacity"].astype(pd.Int64Dtype())
+        self.custom_logger.info(f"Parsed {len(df)} record(s)")
+        return df
 
 
 
