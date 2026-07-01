@@ -27,6 +27,7 @@ DELAY_BETWEEN_PERFS = (1, 3)
 
 DEFAULT_THEATRE_DETAILS = {
     "address": "Theatre, Curve, 60 Rutland Street, Leicester, LE1 1SB",
+    "venue": "Curve Theatre",
     "city": "Leicester",
     "country": "UK",
 }
