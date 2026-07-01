@@ -1,4 +1,4 @@
-"""Blumenthal Arts extractor implementation using the framework."""
+"""Circle Online extractor implementation using the framework."""
 
 import json
 import re
@@ -30,7 +30,7 @@ from utils.scraping_helpers import (
     standardize_category,
 )
 
-from .blumenthal_arts_config import (
+from .circle_online_config import (
     DEFAULT_THEATRE_DETAILS,
     MAX_RETRIES,
     PAGES,
@@ -47,12 +47,12 @@ from .blumenthal_arts_config import (
 logger = setup_logger(__name__, log_to_file=False)
 
 
-class BlumenthalArtsExtractor(BaseExtractor):
-    """Extractor for Blumenthal Arts website using SeleniumBase."""
+class CircleOnlineExtractor(BaseExtractor):
+    """Extractor for Circle Online website using SeleniumBase."""
 
     def __init__(self, local_test=False, show_count=2, **kwargs):
         super().__init__(
-            site_id="blumenthal_arts",
+            site_id="Circle_online",
             log_to_file=False,
             log_to_terminal=True,
             local_test=local_test,
@@ -481,7 +481,7 @@ class BlumenthalArtsExtractor(BaseExtractor):
 
 
 def main():
-    extractor = BlumenthalArtsExtractor(
+    extractor = CircleOnlineExtractor(
         save_csv_locally=False, 
         csv_incremental_mode=False
     )
