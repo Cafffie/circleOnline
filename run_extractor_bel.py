@@ -123,6 +123,52 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             self.custom_logger.warning(f" Venue extraction failed, fallback to default: {e}", "warning")
             return DEFAULT_THEATRE_DETAILS["venue"]
 
+    def _extract_performances(self, sb) -> list[dict]: 
+        """Parses performance instances directly from Curve's single or continuous date markers."""
+        performances = []
+
+        try:
+            year_element = sb.get_text( ".show__time, .show__date")
+            self.custom_logger.info(f" Year element found")
+            year = year_element.strip().split(" ")[-1].strip()
+        except Exception as e:
+            year = str(datetime.now().year) 
+            self.custom_logger.info(f" Year parse error, Fallback to current year : {e}", "warning")
+                
+        try:
+            date_blocks = sb.find_elements(By.CSS_SELECTOR, "article.listing__info") # Fixed: db -> sb
+            self.custom_logger.info(f" Found {len(date_blocks)} performance dates")
+
+            for block in date_blocks:
+                booking_url = block.find_element(By.TAG_NAME, "a").get_attribute("href")
+                if not booking_url:
+                    continue
+                    
+                raw_date_text = block.find_element(By.CSS_SELECTOR, ".listing__date time").get_attribute("textContent").strip()
+                if not raw_date_text:
+                    continue
+                    
+                raw_time_text = block.find_element(By.CSS_SELECTOR, ".listing__time time").get_attribute("textContent").strip()
+                if not raw_time_text:
+                    continue
+                    
+                date_string = f"{raw_date_text} {year} {raw_time_text}"
+                parsed_dt = parser.parse(date_string)
+
+                date_ymd = parsed_dt.strftime("%Y-%m-%d")
+                time_hm = parsed_dt.strftime("%H:%M")
+          
+                performances.append({
+                    "date": date_ymd,
+                    "time": time_hm,  
+                    "booking_url": booking_url
+                })
+
+        except Exception as e:
+            self.custom_logger.debug(f" Error extracting performances: {e}")
+
+        return performances
+
          
 
     def _scrape_one_show(self, sb, show_url: str, category: str) -> dict | None:
@@ -174,7 +220,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         human_scroll(sb)
         time.sleep(3)
 
-        upcoming_performances = []
+        upcoming_performances = self._extract_performances(sb)
         seat_pricing = {}
         performance_links = {}  # href → datetime_key
 
