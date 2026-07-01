@@ -77,16 +77,6 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         except Exception:
             pass
 
-    def get_pagination_links(self, sb):
-        pages = sb.find_elements(SELECTORS["pagination_link"])
-        links = []
-        for p in pages:
-            link = p.get_attribute("href")
-            page_number = p.get_attribute("data-number")
-            if link:
-                links.append((page_number, link))
-        return links
-
     def get_links(self, sb, xpath):
         elements = sb.find_elements(By.XPATH, xpath)
         return [e.get_attribute("href") for e in elements if e.get_attribute("href")]
