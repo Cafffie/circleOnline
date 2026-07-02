@@ -53,7 +53,7 @@ class CurveOnlineExtractor(BaseExtractor):
 
     def safe_get(self, sb, url, wait=10):
         try:
-            self.custom_logger.info("Loading URL: %s", url)
+            #self.custom_logger.info("Loading URL: %s", url)
             sb.uc_open_with_reconnect(url, reconnect_time=wait if wait > 4 else 4)
             if (
                 "captcha" in sb.get_current_url().lower()
@@ -141,11 +141,12 @@ class CurveOnlineExtractor(BaseExtractor):
 
     def _extract_performances(self, sb) -> list[dict]: 
         """Parses performance instances directly from Curve's single or continuous date markers."""
+        
         performances = []
+        seen_urls = set()
 
         try:
             year_element = sb.get_text( ".show__time, .show__date")
-            self.custom_logger.info(f" Year element found: {year_element}")
             year = year_element.strip().split(" ")[-1].strip()
         except Exception as e:
             year = str(datetime.now().year) 
@@ -154,50 +155,35 @@ class CurveOnlineExtractor(BaseExtractor):
         try:
             date_blocks = sb.find_elements(By.CSS_SELECTOR, ".listing--info, article.listing__info")
             self.custom_logger.info(f" Found {len(date_blocks)} performance dates")
-            self.custom_logger.info(f" first date_blocks {date_blocks[0]} performance dates")
 
             for block in date_blocks:
-                booking_url = block.find_element(By.TAG_NAME, "a").get_attribute("href")
-                if not booking_url:
-                    self.custom_logger.info(f" booking_url not found for performance date")
-                    continue
+                try:
+                    booking_url = block.find_element(By.TAG_NAME, "a").get_attribute("href") 
+                    # Deduplicate based on unique performance booking URL
+                    if booking_url in seen_urls:
+                        continue
+
+                    raw_date_text = block.find_element(By.CSS_SELECTOR, ".listing__date time").get_attribute("textContent").strip()
+                    raw_time_text = block.find_element(By.CSS_SELECTOR, ".listing__time time").get_attribute("textContent").strip()
+                    if not raw_date_text or not raw_time_text:
+                        continue
+                        
+                    date_string = f"{raw_date_text} {year} {raw_time_text}"
+                    parsed_dt = parser.parse(date_string)
+                   
+                    date_ymd = self._parse_date(date_string).strftime("%Y-%m-%d")
+                    time_hm = convert_to_24hr(raw_time_text)
                     
-                raw_date_text = block.find_element(By.CSS_SELECTOR, ".listing__date time").get_attribute("textContent").strip()
-                if not raw_date_text:
-                    self.custom_logger.info(f" raw_date_text not found for performance date")
-                    continue
-                    
-                raw_time_text = block.find_element(By.CSS_SELECTOR, ".listing__time time").get_attribute("textContent").strip()
-                if not raw_time_text:
-                    self.custom_logger.info(f" raw_time_text not found for performance date")
-                    continue
-                    
-                date_string = f"{raw_date_text} {year} {raw_time_text}"
-                if not date_string:
-                    self.custom_logger.info(f" date_string not found for performance date")
-                    continue
+                    performances.append({
+                        "date": date_ymd,
+                        "time": time_hm,  
+                        "booking_url": booking_url
+                    })
+                    seen_urls.add(booking_url)
 
-                parsed_dt = parser.parse(date_string)
-                if not parsed_dt:
-                    self.custom_logger.info(f" failed to parse date for performance date")
+                except Exception as inner_e:
+                    self.custom_logger.debug(f"Date block parsing failed due to inner error: {inner_e}")
                     continue
-
-
-                date_ymd = self._parse_date(date_string).strftime("%Y-%m-%d")
-                if not date_ymd:
-                    self.custom_logger.info(f" failed to parse date_ymd for performance date")
-                    continue
-
-                time_hm = convert_to_24hr(raw_time_text)
-                if not time_hm:
-                    self.custom_logger.info(f" failed to parse time for performance date")
-                    continue
-          
-                performances.append({
-                    "date": date_ymd,
-                    "time": time_hm,  
-                    "booking_url": booking_url
-                })
 
         except Exception as e:
             self.custom_logger.debug(f" Error extracting performances: {e}")
@@ -205,9 +191,11 @@ class CurveOnlineExtractor(BaseExtractor):
 
     def extract_seats(self, sb) -> tuple:
         """Extracts seats and pricing from the currently open SVG modal."""
+
         max_capacity = None
         currency = None
         seat_list = []
+
         try:
             seats = sb.find_elements(By.CSS_SELECTOR, "div.SeatingArea img[class*='Seat'], rect.seat")
             self.custom_logger.info(f" Found {len(seats)} unique seats. ")
@@ -256,39 +244,35 @@ class CurveOnlineExtractor(BaseExtractor):
             if not key:
                 continue
 
-            # Confirm if sold out
-            if not self.safe_get(sb, perf["booking_url"]):
-                seat_pricing[key] = []
-                continue
             
-            self.custom_logger.info(f" [{i}/{len(performances)}] {perf['date']} {perf['time']}")
+            
+            self.custom_logger.info(f" [{i}/{len(performances)}] Seats for {perf['date']} {perf['time']}")
 
             try:
-                self.safe_get(sb, perf["booking_url"])
-                human_delay(4, 5.5)
-
-                sb.wait_for_element_present("#SpektrixIFrame", timeout=12)
-                self.custom_logger.info(f" SpektrixIFrame found for {perf['date']} {perf['time']}")
-
-                iframes = sb.find_elements(By.ID, "#SpektrixIFrame")
-                if iframes:
-                    iframe = iframes[0]
-                    sb.switch_to.frame(iframe)
+                # Confirm if sold out
+                if not self.safe_get(sb, perf["booking_url"]):
+                    self.custom_logger.info(f"Performance {perf_key} is sold out.")
+                    seat_pricing[key] = []
+                    continue
                     
+                    human_delay(4, 5.5)
+
+                if sb.is_element_present("#SpektrixIFrame"):
+                    sb.switch_to_frame("#SpektrixIFrame")
+
                     # --- SINGLE-PASS ADDRESS EXTRACTION ---
                     if not venue_extracted:
-                        venue_details = self._get_theatre_address(sb) 
+                        venue_details = self._get_theatre_address(sb)
+
                         venue_extracted = True
                     # ------------------------------------------------
-
                     sb.wait_for_element_present("div.SeatingArea img, rect.seat", timeout=12)
-                    self.custom_logger.info(f" Seats found for {perf['date']} {perf['time']}")
-                    seat_list, currency, capacity = self.extract_seats(sb)
-
-                    if seat_list:
-                        seat_pricing[key] = seat_list  
+                    if sb.is_element_present("div.SeatingArea img, rect.seat"):
+                        seat_list, currency, capacity = self.extract_seats(sb)
+                        if seat_list:
+                            seat_pricing[key] = seat_list  
                 
-                    self.custom_logger.info(f" {len(seat_list)} seats extracted")
+                        self.custom_logger.info(f" Seats: {len(seat_list)} | Capacity: {capacity} | Currency: {currency}")
                 else:
                     seat_pricing[key] = []
                     encountered_no_seatmap = True  
@@ -339,8 +323,6 @@ class CurveOnlineExtractor(BaseExtractor):
         self.accept_cookies(sb)
         human_delay(2, 4)
 
-        
-
         self.custom_logger.info("Category: %s", category)
         self.custom_logger.info("Title: %s", title)
         self.custom_logger.info("Terminal: %s", terminal_date)
@@ -359,13 +341,31 @@ class CurveOnlineExtractor(BaseExtractor):
         if not performances:
             self.custom_logger.warning(f"  No performances found for '{title}', skipping")
             return None
-        if performances:
-            sorted_dates = sorted([p["date"] for p in performances])
-            if not open_date or open_date > close_date:
-                open_date = sorted_dates[0]
+       
+        sorted_dates = sorted([p["date"] for p in performances])
+        first_perf_date = sorted_dates[0]
+        last_perf_date = sorted_dates[-1]
+        if not open_date: # or open_date > close_date
+            open_date = sorted_dates[0]
             
-            if not close_date:
-                close_date = sorted_dates[-1]
+        if not close_date:
+            close_date = sorted_dates[-1]
+
+        if open_date > close_date:
+            self.custom_logger.warning(
+                "  Open date %s is after close date %s. Adjusting open date to performance.",)
+            open_date = sorted_dates[0]
+        
+        if open_date > first_perf_date:
+            self.custom_logger.warning(
+                "  Open date %s is after first performance date %s. Adjusting open date to performance.",)
+            open_date = first_perf_date
+
+        if close_date < last_perf_date:
+            self.custom_logger.warning(
+                "  Close date %s is before last performance date %s. Adjusting close date to performance.",)
+            close_date = last_perf_date
+
             
         seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(sb, performances)
 
@@ -406,7 +406,7 @@ class CurveOnlineExtractor(BaseExtractor):
             "capacity": capacity,
             "currency": currency or DEFAULT_CURRENCY,
             "is_limited_run": None,
-            "scrape_datetime": get_scrape_datetime(),
+            "scrape_datetime": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
 
     def _scrape_shows(self, sb, show_links: list, category: str) -> None:
