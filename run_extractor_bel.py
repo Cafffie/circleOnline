@@ -23,7 +23,13 @@ from utils.scraping_helpers import (
     standardize_category,
 )
 
-from .belfast_grand_opera_house_config import BASE_URLS, DEFAULT_CURRENCY, SELECTORS
+from .belfast_grand_opera_house_config import (
+DEFAULT_THEATRE_DETAILS,
+COOKIE_BTN_XPATH,
+PAGES,
+BASE_URLS,
+DEFAULT_CURRENCY, 
+SELECTORS)
 
 logger = setup_logger(__name__, log_to_file=False)
 
@@ -123,6 +129,30 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             self.custom_logger.warning(f" Venue extraction failed, fallback to default: {e}", "warning")
             return DEFAULT_THEATRE_DETAILS["venue"]
 
+    def _get_theatre_address(self, sb) -> dict:
+        """Extract theatre address."""
+        data = {}
+        try:
+            address = sb.find_element(By.XPATH, SELECTORS["theatre_address"]).text.strip().replace("\n", "") # Fixed selector lookup strategy
+            if address:
+                data["address"] = address
+                parts = address.split(",")
+                curve = parts[1] if len(parts) > 1 else ""
+                theatre = parts[0]
+
+                venue_string = f"{curve} {theatre}"
+                data["venue"] = venue_string.strip() if "curve" in address.lower() else "Studio Theatre"
+                
+                postcode = extract_postcode(address, region="UK")
+                city, country = get_city_country_uk(postcode)
+                data["city"] = city
+                data["country"] = country
+
+        except Exception as e:
+            self.custom_logger.info(f" Address extraction failed: {e}", "warning")
+            return DEFAULT_THEATRE_DETAILS
+    
+
     def _extract_performances(self, sb) -> list[dict]: 
         """Parses performance instances directly from Curve's single or continuous date markers."""
         performances = []
@@ -155,8 +185,8 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
                 date_string = f"{raw_date_text} {year} {raw_time_text}"
                 parsed_dt = parser.parse(date_string)
 
-                date_ymd = parsed_dt.strftime("%Y-%m-%d")
-                time_hm = parsed_dt.strftime("%H:%M")
+                date_ymd = self._parse_date(date_string).strftime("%Y-%m-%d")
+                time_hm = convert_to_24hr(raw_time_text)
           
                 performances.append({
                     "date": date_ymd,
@@ -166,8 +196,115 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
 
         except Exception as e:
             self.custom_logger.debug(f" Error extracting performances: {e}")
-
         return performances
+
+    def extract_seats(self, sb) -> tuple:
+        """Extracts seats and pricing from the currently open SVG modal."""
+        max_capacity = None
+        currency = None
+        seat_list = []
+        try:
+            seats = sb.find_elements(By.CSS_SELECTOR, "div.SeatingArea img[class*='Seat'], rect.seat")
+            self.custom_logger.info(f" Found {len(seats)} unique seats. ")
+
+            for seat in seats:
+                tooltip = seat.get_attribute("tooltip") or seat.get_attribute("title") or ""
+                
+                perf_capacity = len(seats) if seats else None
+                if max_capacity is None or perf_capacity > max_capacity:
+                    max_capacity = perf_capacity
+                
+                if currency is None and tooltip:
+                    currency = get_currency_from_price(tooltip)
+
+                if not tooltip:
+                    continue
+
+                match = re.search(r"([A-Z]+\d+)\s*-\s*£?([\d,.]+)", tooltip)
+                if not match:
+                    continue
+                seat_id = match.group(1)
+                ticket_price = float(match.group(2).replace(",", ""))
+
+                seat_list.append({
+                    "seat": seat_id,
+                    "ticket_price": ticket_price
+                })
+
+        except Exception as e:
+            self.custom_logger.debug(f"Seat canvas extraction subloop failure: {e}")
+        
+        self.custom_logger.info(f" Total capacity: {max_capacity} seats ({len(seat_list)} priced)")
+        return seat_list, currency, max_capacity
+
+    def extract_seat_metrics(self, sb, performances): # Fixed: Indented inside class
+        """Extracts seats and pricing from internal ticket frame configurations."""
+        
+        venue_details = {}
+        venue_extracted = False
+        seat_pricing = {}
+
+        encountered_no_seatmap = False
+        
+        for i, perf in enumerate(performances, start=1):
+            key = format_datetime_key(perf["date"], perf["time"])
+            if not key:
+                continue
+
+            # Confirm if sold out
+            if not self.safe_get(sb, perf["booking_url"])
+                seat_pricing[key] = []
+                continue
+            
+            self.custom_logger.info(f" [{i}/{len(performances)}] {perf['date']} {perf['time']}")
+
+            try:
+                self.safe_get(sb, perf["booking_url"])
+                human_delay(5, 6.5)
+
+                sb.wait_for_element_present("SpektrixIFrame", timeout=12)
+                iframes = sb.find_elements(By.ID, "SpektrixIFrame")
+                if iframes:
+                    iframe = iframes[0]
+                    sb.switch_to.frame(iframe)
+                    
+                    # --- SINGLE-PASS ADDRESS EXTRACTION ---
+                    if not venue_extracted:
+                        venue_details = self._get_theatre_address(sb) 
+                        venue_extracted = True
+                    # ------------------------------------------------
+
+                    sb.wait_for_element_present("div.SeatingArea img, rect.seat", timeout=12)
+                    seat_list, currency, capacity = self.extract_seats(sb)
+
+                    if seat_list:
+                        seat_pricing[key] = seat_list  
+                
+                    self.custom_logger.info(f" {len(seat_list)} seats extracted")
+                else:
+                    seat_pricing[key] = []
+                    encountered_no_seatmap = True  
+                    self.custom_logger.info(f" No seat map available for {perf['date']} {perf['time']}")
+
+            except Exception as e:
+                seat_pricing[key] = []
+                encountered_no_seatmap = True  
+                self.custom_logger.warning(f" Seat extraction error: {e}")
+                perf["capacity"] = None
+            finally:
+                try:
+                    sb.switch_to.default_content()
+                except:
+                    pass
+
+            human_delay(*DELAY_BETWEEN_PERFS)
+
+        if encountered_no_seatmap and all(len(seat_list) == 0 for seat_list in seat_pricing.values()):
+            self.custom_logger.info(" All performances lack a seat map layout. Resetting seat_pricing = {}")
+            seat_pricing = {}
+
+        self.custom_logger.info(" Seat extraction flow processed")
+        return seat_pricing, currency, capacity, venue_details
 
          
 
@@ -220,212 +357,46 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         human_scroll(sb)
         time.sleep(3)
 
-        upcoming_performances = self._extract_performances(sb)
-        seat_pricing = {}
-        performance_links = {}  # href → datetime_key
-
-        instances = sb.find_elements(By.CSS_SELECTOR, SELECTORS["event_instance"])
-        self.custom_logger.info("Found %d instances", len(instances))
-
-        for inst in instances:
-            try:
-                date_elem = inst.find_element(
-                    By.CSS_SELECTOR, SELECTORS["instance_date"]
-                )
-                date_text = sb.execute_script(
-                    "return arguments[0].textContent.trim();", date_elem
-                )
-                if not date_text:
-                    continue
-
-                time_elem = inst.find_element(
-                    By.CSS_SELECTOR, SELECTORS["instance_time"]
-                )
-                time_text = sb.execute_script(
-                    "return arguments[0].textContent.trim();", time_elem
-                )
-                if not time_text:
-                    continue
-
-                date_obj = datetime.strptime(date_text, "%d %B, %Y")
-                date = date_obj.strftime("%Y-%m-%d")
-                time_obj = datetime.strptime(time_text.lower(), "%I:%M%p")
-                time_val = time_obj.strftime("%H:%M")
-                datetime_key = f"{date} {time_val}"
-
-                upcoming_performances.append({"date": date, "time": time_val})
-                seat_pricing[datetime_key] = []
-
-                link_elem = inst.find_elements(
-                    By.CSS_SELECTOR, SELECTORS["instance_link"]
-                )
-                if link_elem:
-                    href = link_elem[0].get_attribute("href")
-                    performance_links[href] = datetime_key
-
-                self.custom_logger.info("Collected: %s", datetime_key)
-
-            except Exception as e:
-                self.custom_logger.warning("Error parsing performance: %s", e)
-
-        self.custom_logger.info(
-            "Total performances: %d | Links: %d",
-            len(upcoming_performances),
-            len(performance_links),
-        )
-
-        capacity_values: list[int] = []
-        currency = None
-        failed_perfs: list[tuple] = []  # (href, datetime_key)
-
-        # ── First pass ────────────────────────────────────────────────
-        for link, datetime_key in performance_links.items():
-            full_link = f"https://www.goh.co.uk{link}" if link.startswith("/") else link
-            self.custom_logger.info(
-                "Opening performance: %s - %s", datetime_key, full_link
-            )
-            self.safe_get(sb, full_link)
-            human_delay(5, 6.5)
-
-            try:
-                sb.execute_script(
-                    "var el = document.querySelector('.icon-close'); if (el) el.click();"
-                )
-            except Exception:
-                pass
-            human_delay(5, 7)
-
-            seats, cap, curr = self._scrape_performance_seats(sb)
-
-            if seats or cap:
-                seat_pricing[datetime_key] = seats
-                if cap:
-                    capacity_values.append(cap)
-                if curr and currency is None:
-                    currency = curr
-                self.custom_logger.info(
-                    "Performance %s: %d seats, capacity=%s",
-                    datetime_key,
-                    len(seats),
-                    cap,
-                )
-            else:
-                self.custom_logger.warning(
-                    "Performance %s: no data — queued for retry", datetime_key
-                )
-                failed_perfs.append((link, datetime_key))
-
-        # ── Retry passes ──────────────────────────────────────────────
-        _MAX_RETRY_PASSES = 10
-        for _retry_pass in range(1, _MAX_RETRY_PASSES + 1):
-            if not failed_perfs:
-                break
-
-            _cd_min = min(30 + 10 * (_retry_pass - 1), 60)
-            _cd_max = min(60 + 15 * (_retry_pass - 1), 120)
-            self.custom_logger.info(
-                "Performance retry pass %d/%d — %d failed | cooling down %d-%ds",
-                _retry_pass,
-                _MAX_RETRY_PASSES,
-                len(failed_perfs),
-                _cd_min,
-                _cd_max,
-            )
-            human_scroll(sb)
-            human_delay(_cd_min, _cd_max)
-
-            still_failed = []
-            for link, datetime_key in failed_perfs:
-                full_link = (
-                    f"https://www.goh.co.uk{link}" if link.startswith("/") else link
-                )
-                self.custom_logger.info(
-                    "Retry %d: %s - %s", _retry_pass, datetime_key, full_link
-                )
-                self.safe_get(sb, full_link)
-                human_delay(5, 6.5)
-
-                try:
-                    sb.execute_script(
-                        "var el = document.querySelector('.icon-close'); if (el) el.click();"
-                    )
-                except Exception:
-                    pass
-                human_delay(5, 7)
-
-                seats, cap, curr = self._scrape_performance_seats(sb)
-
-                if seats or cap:
-                    seat_pricing[datetime_key] = seats
-                    if cap:
-                        capacity_values.append(cap)
-                    if curr and currency is None:
-                        currency = curr
-                    self.custom_logger.info(
-                        "Retry pass %d success: %s — %d seats",
-                        _retry_pass,
-                        datetime_key,
-                        len(seats),
-                    )
-                else:
-                    still_failed.append((link, datetime_key))
-                    self.custom_logger.warning(
-                        "Retry pass %d still failed: %s", _retry_pass, datetime_key
-                    )
-
-                human_delay(8, 14)
-
-            failed_perfs = still_failed
-
-        if failed_perfs:
+        performances = self._extract_performances(sb)
+        if not performances:
             self.custom_logger.warning(
-                "%d performance(s) still empty after %d retry passes: %s",
-                len(failed_perfs),
-                _MAX_RETRY_PASSES,
-                [fp[1] for fp in failed_perfs],
+                f"  No performances found for '{show['title']}', skipping"
             )
-
-        # Sold-out performances have a datetime key but no navigation link.
-        # No-seat-map performances were navigated but returned no seats.
-        visited_keys = set(performance_links.values())
-        sold_out_keys = {k for k in seat_pricing if k not in visited_keys}
-        any_seats_found = any(seat_pricing.get(k) for k in visited_keys)
-
-        if visited_keys and not any_seats_found:
-            seat_pricing = {}
-        else:
-            seat_pricing = {
-                k: v for k, v in seat_pricing.items() if k in sold_out_keys or v
-            }
-
-        for perf in upcoming_performances:
-            key = f"{perf['date']} {perf['time']}"
-            if key not in seat_pricing:
-                seat_pricing[key] = []
-
-        sample_seats = ", ".join(
-            s["seat"] for v in list(seat_pricing.values())[:1] for s in v[:5]
+            return None
+        if performances:
+            sorted_dates = sorted([p["date"] for p in performances])
+            if not open_date or open_date > close_date:
+            open_date = sorted_dates[0]
+            
+            if not close_date:
+            close_date = sorted_dates[-1]
+            
+        seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(sb, performances)
+        self.custom_logger.info(
+            "Performances: %d | Seat keys: %d",
+            len(performances),
+            len(seat_pricing),
         )
-        final_capacity = max(capacity_values) if capacity_values else None
-        self.custom_logger.info("Total Capacity: %s", final_capacity)
+        self.custom_logger.info("Capacity: %s", capacity)
         self.custom_logger.info("Currency: %s", currency)
-        self.custom_logger.info("Sample Seats: %s", sample_seats)
 
         return {
             "title": title,
             "category": category,
             "venue": venue_name,
             "venue_url": venue_url,
-            "address": address,
-            "city": city,
-            "country": country,
+            "address": venue_details["address"]
+            "city": venue_details["city"]
+            "country": normalize_country(venue_details["country"]),
             "open_date": open_date,
             "close_date": close_date,
-            "booking_start_date": None,
+            "booking_start_date": open_date,
             "booking_end_date": close_date,
-            "upcoming_performances": upcoming_performances,
+            "upcoming_performances": [
+                {"date": p["date"], "time": p["time"]} for p in performances
+            ],
             "seat_pricing": seat_pricing,
-            "capacity": final_capacity,
+            "capacity": capacity,
             "currency": currency or DEFAULT_CURRENCY,
             "is_limited_run": None,
             "scrape_datetime": get_scrape_datetime(),
@@ -535,9 +506,10 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
 
 
 def main():
-    """Example usage of the Belfast Grand Opera House extractor."""
-    extractor = BelfastGrandOperaHouseExtractor(
-        save_csv_locally=False, csv_incremental_mode=False
+    """Example usage of the Curve Online extractor."""
+    extractor = CurveOnlineExtractor(
+        save_csv_locally=False, 
+        csv_incremental_mode=False
     )
     result = extractor.run()
     logger.info(f"Extraction result: {result}")
