@@ -351,8 +351,9 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         self.custom_logger.info("-" * 50)
 
         sb.execute_script(
-            "document.querySelector('button[aria-label*=\"Book Tickets\"]').click();"
+            "document.querySelector('a[href*="/book/"]').click();"
         )
+
         human_delay(10, 12.5)
         human_scroll(sb)
         time.sleep(3)
@@ -372,6 +373,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             close_date = sorted_dates[-1]
             
         seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(sb, performances)
+        
         self.custom_logger.info(
             "Performances: %d | Seat keys: %d",
             len(performances),
