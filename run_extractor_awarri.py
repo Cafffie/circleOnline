@@ -1,10 +1,11 @@
-"""Belfast Grand Opera House extractor implementation using the framework."""
+"""Curve Online extractor implementation using the framework."""
 import json
 import random
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, date
+from dateutil import parser
 
 import pandas as pd
 from selenium.webdriver.common.by import By
@@ -21,25 +22,27 @@ from utils.scraping_helpers import (
     human_scroll,
     parse_booking_dates,
     standardize_category,
+    normalize_country,
+    convert_to_24hr,
+    format_datetime_key,
 )
 
-from .belfast_grand_opera_house_config import (
+from .curve_online_config import (
 DEFAULT_THEATRE_DETAILS,
 COOKIE_BTN_XPATH,
 PAGES,
-BASE_URLS,
 DEFAULT_CURRENCY, 
 SELECTORS)
 
 logger = setup_logger(__name__, log_to_file=False)
 
 
-class BelfastGrandOperaHouseExtractor(BaseExtractor):
-    """Extractor for Belfast Grand Opera House website."""
+class CurveOnlineExtractor(BaseExtractor):
+    """Extractor for Curve Online website."""
 
     def __init__(self, local_test=False, show_count=2, **kwargs):
         super().__init__(
-            site_id="belfast_grand_opera_house",
+            site_id="curve_online",
             log_to_file=False,
             log_to_terminal=True,
             local_test=local_test,
@@ -77,21 +80,34 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         except Exception:
             pass
 
-    def get_show_links(self, sb, selector):
+
+    def _parse_date(self, text: str) -> date | None:
+        try:
+            dt = parser.parse(text, dayfirst=True, fuzzy=True)
+            if dt.date() < date.today():
+                dt = dt.replace(year=dt.year + 1)
+            return dt
+        except Exception as e:
+            self.custom_logger.error(f"_parse_date failed for '{text}': {e}")
+            return None
+
+
+    def get_show_links(self, sb):
         elements = sb.find_elements(By.CSS_SELECTOR, "article.listing__item a")
         return [e.get_attribute("href") for e in elements if e.get_attribute("href")]
 
     def _get_show_title(self, sb) -> str | None:
         """Extract show title."""
         try:
-            return sb.get_text"h2.media__title").strip() or None
+            return sb.get_text("header.flush--right h1.major-title").strip() or None
         except Exception:
             return None
             
     def _get_terminal_dates(self, sb) -> str | None: # Fixed type hinting hint to match output tuple
         """Extract show header dates."""
         try:
-            terminal_date = sb.get_text("article.listing__item show__date")
+            terminal_date = sb.get_text("header.flush--right .show__date")
+            return terminal_date.strip() if terminal_date else None
         except Exception as e:
             self.custom_logger.debug(f" terminal date extraction failed: {e}", "warning")
             return None
@@ -116,6 +132,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
                   city, country = get_city_country_uk(postcode)
                   data["city"] = city
                   data["country"] = country
+            return data
 
         except Exception as e:
             self.custom_logger.info(f" Address extraction failed, fallback to default: {e}", "warning")
@@ -128,34 +145,53 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
 
         try:
             year_element = sb.get_text( ".show__time, .show__date")
-            self.custom_logger.info(f" Year element found")
+            self.custom_logger.info(f" Year element found: {year_element}")
             year = year_element.strip().split(" ")[-1].strip()
         except Exception as e:
             year = str(datetime.now().year) 
-            self.custom_logger.info(f" Year parse error, Fallback to current year : {e}", "warning")
+            self.custom_logger.info(f" Year parse error, Fallback to current year : {e}")
                 
         try:
-            date_blocks = sb.find_elements(By.CSS_SELECTOR, "article.listing__info") # Fixed: db -> sb
+            date_blocks = sb.find_elements(By.CSS_SELECTOR, ".listing--info, article.listing__info")
             self.custom_logger.info(f" Found {len(date_blocks)} performance dates")
+            self.custom_logger.info(f" first date_blocks {date_blocks[0]} performance dates")
 
             for block in date_blocks:
                 booking_url = block.find_element(By.TAG_NAME, "a").get_attribute("href")
                 if not booking_url:
+                    self.custom_logger.info(f" booking_url not found for performance date")
                     continue
                     
                 raw_date_text = block.find_element(By.CSS_SELECTOR, ".listing__date time").get_attribute("textContent").strip()
                 if not raw_date_text:
+                    self.custom_logger.info(f" raw_date_text not found for performance date")
                     continue
                     
                 raw_time_text = block.find_element(By.CSS_SELECTOR, ".listing__time time").get_attribute("textContent").strip()
                 if not raw_time_text:
+                    self.custom_logger.info(f" raw_time_text not found for performance date")
                     continue
                     
                 date_string = f"{raw_date_text} {year} {raw_time_text}"
+                if not date_string:
+                    self.custom_logger.info(f" date_string not found for performance date")
+                    continue
+
                 parsed_dt = parser.parse(date_string)
+                if not parsed_dt:
+                    self.custom_logger.info(f" failed to parse date for performance date")
+                    continue
+
 
                 date_ymd = self._parse_date(date_string).strftime("%Y-%m-%d")
+                if not date_ymd:
+                    self.custom_logger.info(f" failed to parse date_ymd for performance date")
+                    continue
+
                 time_hm = convert_to_24hr(raw_time_text)
+                if not time_hm:
+                    self.custom_logger.info(f" failed to parse time for performance date")
+                    continue
           
                 performances.append({
                     "date": date_ymd,
@@ -221,7 +257,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
                 continue
 
             # Confirm if sold out
-            if not self.safe_get(sb, perf["booking_url"])
+            if not self.safe_get(sb, perf["booking_url"]):
                 seat_pricing[key] = []
                 continue
             
@@ -229,10 +265,12 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
 
             try:
                 self.safe_get(sb, perf["booking_url"])
-                human_delay(5, 6.5)
+                human_delay(4, 5.5)
 
-                sb.wait_for_element_present("SpektrixIFrame", timeout=12)
-                iframes = sb.find_elements(By.ID, "SpektrixIFrame")
+                sb.wait_for_element_present("#SpektrixIFrame", timeout=12)
+                self.custom_logger.info(f" SpektrixIFrame found for {perf['date']} {perf['time']}")
+
+                iframes = sb.find_elements(By.ID, "#SpektrixIFrame")
                 if iframes:
                     iframe = iframes[0]
                     sb.switch_to.frame(iframe)
@@ -244,6 +282,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
                     # ------------------------------------------------
 
                     sb.wait_for_element_present("div.SeatingArea img, rect.seat", timeout=12)
+                    self.custom_logger.info(f" Seats found for {perf['date']} {perf['time']}")
                     seat_list, currency, capacity = self.extract_seats(sb)
 
                     if seat_list:
@@ -266,7 +305,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
                 except:
                     pass
 
-            human_delay(*DELAY_BETWEEN_PERFS)
+            human_delay(5, 7)
 
         if encountered_no_seatmap and all(len(seat_list) == 0 for seat_list in seat_pricing.values()):
             self.custom_logger.info(" All performances lack a seat map layout. Resetting seat_pricing = {}")
@@ -283,11 +322,9 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         Returns a completed row dict on success, or None if the show page
         did not render (bot challenge, timeout) — the caller retries.
         """
+        
         if not self.safe_get(sb, show_url):
             return None
-
-        self.accept_cookies(sb)
-        human_delay(2, 4)
 
         title = self._get_show_title(sb)
         if not title:
@@ -298,6 +335,11 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             booking_dates = parse_booking_dates(terminal_date)
             open_date = booking_dates.get("start_date")
             close_date = booking_dates.get("end_date")
+        
+        self.accept_cookies(sb)
+        human_delay(2, 4)
+
+        
 
         self.custom_logger.info("Category: %s", category)
         self.custom_logger.info("Title: %s", title)
@@ -307,9 +349,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         self.custom_logger.info("Close Date: %s", close_date)
         self.custom_logger.info("-" * 50)
 
-        sb.execute_script(
-            "document.querySelector('a[href*="/book/"]').click();"
-        )
+        #sb.execute_script("document.querySelector('a[href*=\"/book/\"]').click();")
 
         human_delay(10, 12.5)
         human_scroll(sb)
@@ -317,20 +357,19 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
 
         performances = self._extract_performances(sb)
         if not performances:
-            self.custom_logger.warning(
-                f"  No performances found for '{show['title']}', skipping"
-            )
+            self.custom_logger.warning(f"  No performances found for '{title}', skipping")
             return None
         if performances:
             sorted_dates = sorted([p["date"] for p in performances])
             if not open_date or open_date > close_date:
-            open_date = sorted_dates[0]
+                open_date = sorted_dates[0]
             
             if not close_date:
-            close_date = sorted_dates[-1]
+                close_date = sorted_dates[-1]
             
         seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(sb, performances)
 
+        venue_url = sb.get_current_url()
         venue_name =  venue_details["venue"]
         address = venue_details["address"]
         city = venue_details["city"]
@@ -430,10 +469,11 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             chromium_arg="--enable-features=TranslateUI",
         ) as sb:
             self.custom_logger.info(
-                "Starting extraction from Belfast Grand Opera House"
+                "Starting extraction from Curve Online"
             )
 
-            for url in BASE_URLS:
+            for i, (url, category) in enumerate(PAGES):
+                self.custom_logger.info(f"[Listing] {category}: {url}")
                 if not self.safe_get(sb, url):
                     continue
 
@@ -441,28 +481,15 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
                 sb.maximize_window()
                 self.accept_cookies(sb)
 
-                category = standardize_category(
-                    "drama" if "drama" in url.lower() else "musical"
-                )
-                self.custom_logger.info("Category: %s", category)
+                show_links = self.get_show_links(sb)
 
-                links = self.get_pagination_links(sb)
-                pages = links if links else [(1, sb.get_current_url())]
+                if self.local_test:
+                    self.custom_logger.info(
+                        "LOCAL TEST MODE: Limiting to %s shows", self.show_count
+                    )
+                    show_links = show_links[: self.show_count]
 
-                for _, link in pages:
-                    self.safe_get(sb, link)
-                    human_delay(7, 8.5)
-                    self.accept_cookies(sb)
-
-                    show_links = self.get_links(sb, SELECTORS["show_links"])
-
-                    if self.local_test:
-                        self.custom_logger.info(
-                            "LOCAL TEST MODE: Limiting to %s shows", self.show_count
-                        )
-                        show_links = show_links[: self.show_count]
-
-                    self._scrape_shows(sb, show_links, category)
+                self._scrape_shows(sb, show_links, category)
 
         return json.dumps(self.all_data, default=str).encode("utf-8")
 
