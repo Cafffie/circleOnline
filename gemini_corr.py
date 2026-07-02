@@ -117,7 +117,7 @@ class CircleOnlineExtractor(BaseExtractor):
         """Extract theatre address."""
         data = {}
         try:
-            address = sb.find_element(By.XPATH, SELECTORS["theatre_address"]).text.strip().replace("\n", "") # Fixed selector lookup strategy
+            address = sb.find_element(By.CSS_SELECTOR, SELECTORS["theatre_address"]).text.strip().replace("\n", "") # Fixed selector lookup strategy
             if address:
                 data["address"] = address
                 parts = address.split(",")
@@ -134,7 +134,7 @@ class CircleOnlineExtractor(BaseExtractor):
 
         except Exception as e:
             self.custom_logger.info(f" Address extraction failed: {e}", "warning")
-            return DEFAULT_THEATRE_DETAILS["address"]
+            return DEFAULT_THEATRE_DETAILS
 
         return data
 
@@ -191,8 +191,7 @@ class CircleOnlineExtractor(BaseExtractor):
             year_element = sb.find_element(By.CSS_SELECTOR, ".show__time, .show__date")
             self.custom_logger.info(f" Year element found")
             split_year = year_element.get_attribute("textContent").strip().split(" ")[-1].strip()
-            if len(split_year) == 4 and split_year.isdigit():
-                year = split_year
+            year = split_year
         except Exception as e:
             year = str(datetime.now().year) 
             self.custom_logger.info(f" Year parse error, Fallback to current year : {e}", "warning")
