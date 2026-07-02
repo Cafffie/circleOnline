@@ -77,8 +77,8 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         except Exception:
             pass
 
-    def get_show_links(self, sb, xpath):
-        elements = sb.find_elements(By.XPATH, xpath)
+    def get_show_links(self, sb, selector):
+        elements = sb.find_elements(By.CSS_SELECTOR, "article.listing__item a")
         return [e.get_attribute("href") for e in elements if e.get_attribute("href")]
 
     def _get_show_title(self, sb) -> str | None:
