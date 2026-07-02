@@ -1,58 +1,49 @@
-"""Circle Online extractor implementation using the framework."""
-
+"""Curve Online extractor implementation using the framework."""
 import json
+import random
 import re
 import sys
-from datetime import date, datetime
+import time
+from datetime import datetime, date
+from dateutil import parser
 
 import pandas as pd
-from dateutil import parser
-from seleniumbase import SB  # Fixed: Imported SB
-from selenium.common.exceptions import TimeoutException, WebDriverException # Fixed: Imported exceptions
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from seleniumbase import SB
 
 from utils.base_extractor import BaseExtractor
 from utils.logger import setup_logger
 from utils.scraping_helpers import (
-    accept_cookies,
-    parse_booking_dates,
-    convert_to_24hr,
     extract_postcode,
-    format_datetime_key,
     get_city_country_uk,
     get_currency_from_price,
     get_scrape_datetime,
     human_delay,
     human_scroll,
-    normalize_country,
+    parse_booking_dates,
     standardize_category,
+    normalize_country,
+    convert_to_24hr,
+    format_datetime_key,
 )
 
-from .circle_online_config import (
+from .curve_online_config import (
     DEFAULT_THEATRE_DETAILS,
-    MAX_RETRIES,
+    COOKIE_BTN_XPATH,
     PAGES,
-    QUEUE_COOKIES,
-    RETRY_DELAY,
-    RUN_HEADLESS,
-    THEATRE_DETAILS_MAP,
-    SELECTORS,               # Added placeholder assumption
-    COOKIE_BTN_XPATH,        # Added placeholder assumption
-    DELAY_BETWEEN_PERFS,     # Added placeholder assumption
-    DELAY_BETWEEN_SHOWS,     # Added placeholder assumption
+    DEFAULT_CURRENCY, 
+    SELECTORS
 )
 
 logger = setup_logger(__name__, log_to_file=False)
 
 
-class CircleOnlineExtractor(BaseExtractor):
-    """Extractor for Circle Online website using SeleniumBase."""
+class CurveOnlineExtractor(BaseExtractor):
+    """Extractor for Curve Online website."""
 
     def __init__(self, local_test=False, show_count=2, **kwargs):
         super().__init__(
-            site_id="Circle_online",
+            site_id="curve_online",
             log_to_file=False,
             log_to_terminal=True,
             local_test=local_test,
@@ -61,63 +52,71 @@ class CircleOnlineExtractor(BaseExtractor):
         )
         self.all_data = []
 
-    def safe_get(self, sb, url: str, wait: int = 10) -> bool | None:
-        """Safely load a URL using SeleniumBase UC mode."""
+    def safe_get(self, sb, url, wait=10):
         try:
             self.custom_logger.info("Loading URL: %s", url)
-
-            sb.uc_open_with_reconnect(url, reconnect_time=max(wait, 4))
-            sb.wait_for_ready_state_complete()
-
-            current_url = sb.get_current_url().lower()
-            page_source = sb.get_page_source().lower()
-
-            if "captcha" in current_url or "distil" in page_source:
+            sb.uc_open_with_reconnect(url, reconnect_time=wait if wait > 4 else 4)
+            if (
+                "captcha" in sb.get_current_url().lower()
+                or "distil" in sb.get_page_source().lower()
+            ):
                 self.custom_logger.warning("Bot protection detected. Solving...")
                 sb.uc_gui_handle_captcha()
-                human_delay(2, 4)
-
+                time.sleep(random.uniform(2, 4))
             self.custom_logger.info("Page loaded successfully: %s", url)
             return True
-
         except Exception as e:
             self.custom_logger.error(
-                "Failed to load page: %s | Exception: %s",
-                url,
-                repr(e),
+                "Failed to load page: %s | Exception: %s", url, repr(e)
             )
             return None
 
-    def safe_find_child(self, element, xpath, many=False): # Fixed: Indentation and added self
-        """Safely find child element(s)."""
+    def accept_cookies(self, sb):
+        cookie_xpath = SELECTORS.get("cookie_button", COOKIE_BTN_XPATH)
         try:
-            return (
-                element.find_elements(By.XPATH, xpath)
-                if many
-                else element.find_element(By.XPATH, xpath)
-            )
-        except Exception as e:
-            logger.debug("Child element not found for XPath: %s | %s", xpath, e)
-            return [] if many else None
+            if sb.is_element_visible(cookie_xpath):
+                human_delay(1, 2.5)
+                sb.click(cookie_xpath)
+                human_delay(2, 3)
+        except Exception:
+            pass
 
-    def get_links(self, sb, xpath):
-        elements = sb.find_elements(By.XPATH, xpath)
-        return [e.get_attribute("href") for e in elements if e.get_attribute("href")]
-
-    def _parse_date(self, text: str) -> date | None:
+    def _parse_date(self, text: str) -> str | None:
         try:
             dt = parser.parse(text, dayfirst=True, fuzzy=True)
             if dt.date() < date.today():
                 dt = dt.replace(year=dt.year + 1)
-            return dt
+            return dt.strftime("%Y-%m-%d")
+        except Exception as e:
+            self.custom_logger.error(f"_parse_date failed for '{text}': {e}")
+            return None
+
+    def get_show_links(self, sb):
+        elements = sb.find_elements(By.CSS_SELECTOR, "article.listing__item a")
+        return list(set([e.get_attribute("href") for e in elements if e.get_attribute("href")]))
+
+    def _get_show_title(self, sb) -> str | None:
+        """Extract show title."""
+        try:
+            return sb.get_text("header.flush--right h1.major-title").strip() or None
         except Exception:
+            return None
+            
+    def _get_terminal_dates(self, sb) -> str | None:
+        """Extract show header dates."""
+        try:
+            terminal_date = sb.get_text("header.flush--right .show__date")
+            return terminal_date.strip() if terminal_date else None
+        except Exception as e:
+            self.custom_logger.debug(f"Terminal date extraction failed: {e}")
             return None
 
     def _get_theatre_address(self, sb) -> dict:
         """Extract theatre address."""
         data = {}
         try:
-            address = sb.find_element(By.CSS_SELECTOR, SELECTORS["theatre_address"]).text.strip().replace("\n", "") # Fixed selector lookup strategy
+            address_element = sb.find_element(".white-wrapper p.AreaAndVenueDetails")
+            address = address_element.text.replace("\n", "") if address_element else ""
             if address:
                 data["address"] = address
                 parts = address.split(",")
@@ -125,111 +124,84 @@ class CircleOnlineExtractor(BaseExtractor):
                 theatre = parts[0]
 
                 venue_string = f"{curve} {theatre}"
-                data["venue"] = venue_string.strip() if "curve" in address.lower() else "Studio Theatre" # Fixed: replaced undefined full_text with address
+                data["venue"] = venue_string.strip() if "curve" in address.lower() else "Studio Theatre"
                 
                 postcode = extract_postcode(address, region="UK")
-                city, country = get_city_country_uk(postcode)
-                data["city"] = city
-                data["country"] = country
-
+                if postcode:
+                    city, country = get_city_country_uk(postcode)
+                    data["city"] = city
+                    data["country"] = country
+            return data if data else DEFAULT_THEATRE_DETAILS
         except Exception as e:
-            self.custom_logger.info(f" Address extraction failed: {e}", "warning")
+            self.custom_logger.info(f"Address extraction failed, fallback to default: {e}")
             return DEFAULT_THEATRE_DETAILS
 
-        return data
-
-    def _get_show_title(self, sb) -> str | None:
-        """Extract show title."""
-        try:
-            return sb.get_text(SELECTORS["title"]).strip() or None
-        except Exception:
-            return None
-
-    def _get_show_dates(self, sb) -> tuple: # Fixed type hinting hint to match output tuple
-        """Extract and parse show open and close dates."""
-        try:
-            terminal_date = sb.get_text(SELECTORS["terminal_date"])
-            parsed_date = parse_booking_dates(terminal_date)
-
-            open_date = parsed_date.get("start_date")
-            close_date = parsed_date.get("end_date")
-        except Exception as e:
-            self.custom_logger.debug(f" terminal date extraction failed: {e}", "warning")
-            return None, None
-        return open_date, close_date
-
-    def _extract_event_list(self, sb, category: str) -> list[dict]: # Fixed: added self
-        """Parses individual cards inside the main events list holder from Curve's layout structure."""
-        shows = []
-        shows_cards = sb.find_elements(By.CSS_SELECTOR, "article.listing__item")
-        self.custom_logger.info(f" Found {len(shows_cards)} show cards")
-
-        for i, card in enumerate(shows_cards, start=1):
-            try:
-                title_element = card.find_element(By.CSS_SELECTOR, "h2.media__title") # Fixed locator strategy signature
-                title = title_element.get_attribute("textContent").strip()
-                link = card.find_element(By.TAG_NAME, "a").get_attribute("href")
-
-                self.custom_logger.info(f" [{i}/{len(shows_cards)}] {title}")
-
-                shows.append({
-                    "title": title,
-                    "event_url": link,
-                    "category": category
-                })
-            except Exception as e:
-                self.custom_logger.debug(f" Event list item parse error at block index {i}: {e}", "warning")
-                continue
-
-        return shows
-
-    def _extract_performances(self, sb) -> list[dict]: # Fixed: Indented inside class
-        """Parses performance instances directly from Curve's single or continuous date markers."""
+    def _extract_performances(self, sb) -> list[dict]: 
+        """Parses performance instances directly from Curve's date markers."""
         performances = []
 
         try:
-            year_element = sb.find_element(By.CSS_SELECTOR, ".show__time, .show__date")
-            self.custom_logger.info(f" Year element found")
-            split_year = year_element.get_attribute("textContent").strip().split(" ")[-1].strip()
-            year = split_year
+            year_element = sb.get_text(".show__time, .show__date")
+            self.custom_logger.info(f"Year element found: {year_element}")
+            year = year_element.strip().split(" ")[-1].strip()
+            if not year.isdigit():
+                year = str(datetime.now().year)
         except Exception as e:
             year = str(datetime.now().year) 
-            self.custom_logger.info(f" Year parse error, Fallback to current year : {e}", "warning")
+            self.custom_logger.info(f"Year parse error, Fallback to current year: {e}")
                 
         try:
-            date_blocks = sb.find_elements(By.CSS_SELECTOR, "article.listing__info") # Fixed: db -> sb
-            self.custom_logger.info(f" Performance Date element found")
+            date_blocks = sb.find_elements(By.CSS_SELECTOR, ".listing--info, article.listing__info")
+            self.custom_logger.info(f"Found {len(date_blocks)} performance dates")
 
             for block in date_blocks:
-                booking_url = block.find_element(By.TAG_NAME, "a").get_attribute("href")
-                raw_date_text = block.find_element(By.CSS_SELECTOR, ".listing__date time").get_attribute("textContent").strip()
-                raw_time_text = block.find_element(By.CSS_SELECTOR, ".listing__time time").get_attribute("textContent").strip()
+                try:
+                    anchor = block.find_element(By.TAG_NAME, "a")
+                    booking_url = anchor.get_attribute("href") if anchor else None
+                    if not booking_url:
+                        continue
+                        
+                    date_elem = block.find_element(By.CSS_SELECTOR, ".listing__date time")
+                    raw_date_text = date_elem.get_attribute("textContent").strip() if date_elem else ""
+                    
+                    time_elem = block.find_element(By.CSS_SELECTOR, ".listing__time time")
+                    raw_time_text = time_elem.get_attribute("textContent").strip() if time_elem else ""
+                    
+                    if not raw_date_text or not raw_time_text:
+                        continue
+                        
+                    date_string = f"{raw_date_text} {year} {raw_time_text}"
+                    date_ymd = self._parse_date(date_string)
+                    if not date_ymd:
+                        continue
 
-                date_string = f"{raw_date_text} {year} {raw_time_text}"
-                parsed_dt = parser.parse(date_string)
-
-                date_ymd = parsed_dt.strftime("%Y-%m-%d")
-                time_hm = parsed_dt.strftime("%H:%M")
-          
-                performances.append({
-                    "date": date_ymd,
-                    "time": time_hm,  
-                    "booking_url": booking_url
-                })
+                    time_hm = convert_to_24hr(raw_time_text)
+                    if not time_hm:
+                        continue
+              
+                    performances.append({
+                        "date": date_ymd,
+                        "time": time_hm,  
+                        "booking_url": booking_url
+                    })
+                except Exception as inner_e:
+                    self.custom_logger.debug(f"Date block parsing error: {inner_e}")
+                    continue
 
         except Exception as e:
-            self.custom_logger.debug(f" Error extracting performances: {e}")
-
+            self.custom_logger.debug(f"Error extracting performances: {e}")
         return performances
 
-    def extract_seats(self, sb) -> tuple: # Fixed: Indented inside class
+    def extract_seats(self, sb) -> tuple:
         """Extracts seats and pricing from the currently open SVG modal."""
+
         max_capacity = None
         currency = None
         seat_list = []
+        
         try:
             seats = sb.find_elements(By.CSS_SELECTOR, "div.SeatingArea img[class*='Seat'], rect.seat")
-            self.custom_logger.info(f" Found {len(seats)} unique seats. ")
+            self.custom_logger.info(f"Found {len(seats)} unique seats.")
 
             for seat in seats:
                 tooltip = seat.get_attribute("tooltip") or seat.get_attribute("title") or ""
@@ -257,147 +229,127 @@ class CircleOnlineExtractor(BaseExtractor):
 
         except Exception as e:
             self.custom_logger.debug(f"Seat canvas extraction subloop failure: {e}")
-            # Fixed: Removed illegal break statement outside loop
         
-        self.custom_logger.info(f" Total capacity: {max_capacity} seats ({len(seat_list)} priced)")
         return seat_list, currency, max_capacity
 
-    def extract_seat_metrics(self, sb, performances): # Fixed: Indented inside class
+    def extract_seat_metrics(self, sb, performances):
         """Extracts seats and pricing from internal ticket frame configurations."""
-        venue_details = {"venue": None, "address": None, "city": None, "country": "UK"}
+        venue_details = DEFAULT_THEATRE_DETAILS.copy()
         venue_extracted = False
         seat_pricing = {}
-        global_max_capacity = None
-        global_currency = None
-
         encountered_no_seatmap = False
+        currency = None
+        capacity = None
         
         for i, perf in enumerate(performances, start=1):
             key = format_datetime_key(perf["date"], perf["time"])
             if not key:
                 continue
 
-            if not perf.get("booking_url"):
-                seat_pricing[key] = []
-                continue
-            
             self.custom_logger.info(f" [{i}/{len(performances)}] {perf['date']} {perf['time']}")
 
             try:
-                sb.open(perf["booking_url"])
+                if not self.safe_get(sb, perf["booking_url"]):
+                    seat_pricing[key] = []
+                    continue
+                
+                human_delay(4, 5.5)
 
-                sb.wait_for_element_present("SpektrixIFrame", timeout=12)
-                iframes = sb.find_elements(By.ID, "SpektrixIFrame")
-                if iframes:
-                    iframe = iframes[0]
-                    sb.switch_to.frame(iframe)
+                if sb.is_element_present("#SpektrixIFrame"):
+                    sb.switch_to_frame("#SpektrixIFrame")
                     
                     if not venue_extracted:
-                        venue_details = self._get_theatre_address(sb) # Fixed instance call syntax
+                        venue_details = self._get_theatre_address(sb) 
                         venue_extracted = True
 
-                    sb.wait_for_element_present("div.SeatingArea img, rect.seat", timeout=12)
-                    seat_list, currency, capacity = self.extract_seats(sb)
-
-                    if currency:
-                        global_currency = currency
-                    if capacity and (global_max_capacity is None or capacity > global_max_capacity):
-                        global_max_capacity = capacity
-
-                    if seat_list:
-                        seat_pricing[key] = seat_list  
-                
-                    self.custom_logger.info(f" {len(seat_list)} seats extracted")
+                    if sb.is_element_present("div.SeatingArea img, rect.seat"):
+                        seat_list, perf_currency, perf_capacity = self.extract_seats(sb)
+                        if seat_list:
+                            seat_pricing[key] = seat_list
+                            if perf_currency:
+                                currency = perf_currency
+                            if perf_capacity:
+                                capacity = perf_capacity
+                        else:
+                            seat_pricing[key] = []
+                    else:
+                        seat_pricing[key] = []
+                        encountered_no_seatmap = True
                 else:
                     seat_pricing[key] = []
                     encountered_no_seatmap = True  
-                    self.custom_logger.info(f" No seat map available for {perf['date']} {perf['time']}")
+                    self.custom_logger.info(f"No seat map iframe available for {perf['date']} {perf['time']}")
 
             except Exception as e:
                 seat_pricing[key] = []
                 encountered_no_seatmap = True  
-                self.custom_logger.warning(f" Seat extraction error: {e}")
-                perf["capacity"] = None
+                self.custom_logger.warning(f"Seat extraction error: {e}")
             finally:
                 try:
                     sb.switch_to.default_content()
                 except:
                     pass
 
-            human_delay(*DELAY_BETWEEN_PERFS)
+            human_delay(3, 5)
 
-        if encountered_no_seatmap and all(len(seat_list) == 0 for seat_list in seat_pricing.values()):
-            self.custom_logger.info(" All performances lack a seat map layout. Resetting seat_pricing = {}")
-            seat_pricing = {}
+        if encountered_no_seatmap and all(len(s) == 0 for s in seat_pricing.values()):
+            self.custom_logger.info("All performances lack a seat map layout.")
 
-        self.custom_logger.info(" Seat extraction flow processed")
-        return seat_pricing, global_currency, global_max_capacity, venue_details # Fixed: Added capacity return value to match assignment target
+        return seat_pricing, currency, capacity, venue_details
 
-    def _log_show_summary(self, record: dict) -> None: # Fixed: Indented inside class
-        seat_pricing = record.get("seat_pricing") or {}
-        perfs = record.get("upcoming_performances") or []
-        divider = "  " + "━" * 54
-        lines = [
-            divider,
-            f"   {record['title']}  [{record['category']}]",
-            f"      Venue    : {record['venue']}, {record['city']}, {record['country']}",
-            f"      Run      : {record['open_date']} → {record['close_date']}",
-            f"      Capacity : {record['capacity']}  |  Currency: {record['currency']}",
-            f"      Performances ({len(perfs)}):",
-        ]
-        for p in perfs:
-            key = f"{p['date']} {p['time']}"
-            seats = seat_pricing.get(key, [])
-            seat_label = f"{len(seats)} seats" if seats else "No seat map availabe or sold out"
-            lines.append(f"        • {key}  →  {seat_label}")
-        lines.append(divider)
-        self.custom_logger.info("\n".join(lines))
-
-    def _scrape_show(self, sb, show: dict) -> dict | None:
-        for attempt in range(1, 4):
-            try:
-                sb.open(show["event_url"])
-                break
-            except (TimeoutException, WebDriverException) as exc:
-                self.custom_logger.warning(
-                    f"  Load attempt {attempt}/3 failed for {show['title']!r}: {type(exc).__name__}"
-                )
-                if attempt == 3:
-                    raise
-                human_delay(1.5, 3.0)
-        
-        accept_cookies(sb, xpath=COOKIE_BTN_XPATH)
-        human_scroll(sb)
-
-        performances = self._extract_performances(sb)
-
-        if not performances:
-            self.custom_logger.warning(f"  No performances found for '{show['title']}', skipping")
+    def _scrape_one_show(self, sb, show_url: str, category: str) -> dict | None:
+        """Scrape a single show page end-to-end."""
+        if not self.safe_get(sb, show_url):
             return None
 
-        open_date, close_date = self._get_show_dates(sb)
+        title = self._get_show_title(sb)
+        if not title:
+            self.custom_logger.warning("No title found for: %s", show_url)
 
-        # Fixed: Removed redundant 'self' inside structural parameter passing
-        seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(sb, performances)
+        open_date, close_date = None, None
+        terminal_date = self._get_terminal_dates(sb)
+        if terminal_date:
+            booking_dates = parse_booking_dates(terminal_date)
+            open_date = booking_dates.get("start_date")
+            close_date = booking_dates.get("end_date")
         
-        if (not open_date or not close_date) and performances:
-            try:
-                sorted_dates = sorted([p["date"] for p in performances])
-                open_date = sorted_dates[0]
-                close_date = sorted_dates[-1]
-            except Exception as e:
-                open_date = datetime.now().strftime("%Y-%m-%d")
-                close_date = datetime.now().strftime("%Y-%m-%d")
-                self.custom_logger.warning(f"Error deriving dates from performances: {e}")
+        self.accept_cookies(sb)
+        human_delay(2, 4)
+
+        self.custom_logger.info("Category: %s", category)
+        self.custom_logger.info("Title: %s", title)
+        self.custom_logger.info("-" * 50)
+
+        human_scroll(sb)
+        time.sleep(2)
+
+        performances = self._extract_performances(sb)
+        if not performances:
+            self.custom_logger.warning(f"No performances found for '{title}', skipping")
+            return None
+
+        sorted_dates = sorted([p["date"] for p in performances])
+        if not open_date:
+            open_date = sorted_dates[0]
+        if not close_date:
+            close_date = sorted_dates[-1]
+            
+        seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(sb, performances)
+
+        venue_url = sb.get_current_url()
+        venue_name = venue_details.get("venue", "Curve Theatre")
+        address = venue_details.get("address", "")
+        city = venue_details.get("city", "Leicester")
+        country = normalize_country(venue_details.get("country", "UK"))
 
         return {
-            "title": show["title"],
-            "venue_url": show["event_url"],
-            "category": standardize_category(show["category"]),
-            "venue": venue_details.get("venue"), # Fixed: undefined variable 'venue'
-            "address": venue_details["address"],
-            "city": venue_details["city"],
-            "country": normalize_country(venue_details["country"]),
+            "title": title,
+            "category": category,
+            "venue": venue_name,
+            "venue_url": venue_url,
+            "address": address,
+            "city": city,
+            "country": country,
             "open_date": open_date,
             "close_date": close_date,
             "booking_start_date": open_date,
@@ -405,87 +357,88 @@ class CircleOnlineExtractor(BaseExtractor):
             "upcoming_performances": [
                 {"date": p["date"], "time": p["time"]} for p in performances
             ],
-            "capacity": capacity,
-            "currency": currency,
-            "is_limited_run": None,
             "seat_pricing": seat_pricing,
+            "capacity": capacity,
+            "currency": currency or DEFAULT_CURRENCY,
+            "is_limited_run": None,
             "scrape_datetime": get_scrape_datetime(),
         }
 
+    def _scrape_shows(self, sb, show_links: list, category: str) -> None:
+        """Scrape individual show pages with multi-pass retry."""
+        _MAX_PASSES = 3
+        pending = list(show_links)
+
+        for _pass in range(1, _MAX_PASSES + 1):
+            if not pending:
+                break
+
+            self.custom_logger.info(
+                "Show pass %d/%d — %d show(s)", _pass, _MAX_PASSES, len(pending)
+            )
+            still_pending = []
+
+            for show_url in pending:
+                row = self._scrape_one_show(sb, show_url, category)
+                if row is None:
+                    still_pending.append(show_url)
+                    self.custom_logger.warning(
+                        "Pass %d: show deferred — %s", _pass, show_url
+                    )
+                else:
+                    self.all_data.append(row)
+                    self.log_record(row)
+                    human_delay(5, 10)
+
+            pending = still_pending
+
+            if pending and _pass < _MAX_PASSES:
+                human_scroll(sb)
+                human_delay(15, 30)
+
     def extract(self) -> bytes:
-        all_data = []
-        with SB(uc=True, headless=RUN_HEADLESS, rtf=True) as sb:
-            try: # Fixed: Correct context block indentation
-                all_shows = []
-                for i, (url, category) in enumerate(PAGES):
-                    self.custom_logger.info(f"[Listing] {category}: {url}")
-                    sb.open(url)
-                    accept_cookies(sb, xpath=COOKIE_BTN_XPATH)
-                    human_scroll(sb)
+        """Open SB session, scrape all shows, populate self.all_data, return JSON bytes."""
+        self.all_data = []
 
-                    shows = self._extract_event_list(sb, category)
-                    self.custom_logger.info(f"  → {len(shows)} show(s) found")
-                    all_shows.extend(shows)
+        with SB(
+            uc=True,
+            test=True,
+            headless=True,
+            browser="chrome",
+            locale="en-US",
+        ) as sb:
+            self.custom_logger.info("Starting extraction from Curve Online")
 
-                # Deduplicate by URL
-                seen_urls: set[str] = set()
-                deduped: list[dict] = []
-                for show in all_shows:
-                    url = show["event_url"]
-                    if url not in seen_urls:
-                        seen_urls.add(url)
-                        deduped.append(show)
-                    else:
-                        self.custom_logger.info(f"  Skipping duplicate: {show['title']!r} (already queued)")
-                all_shows = deduped
+            for url, category in PAGES:
+                if not self.safe_get(sb, url):
+                    continue
 
-                if self.show_count:
-                    all_shows = all_shows[: self.show_count]
-                    self.custom_logger.info(f"show_count={self.show_count}: limited to {len(all_shows)} show(s)")
+                human_delay(3, 5)
+                sb.maximize_window()
+                self.accept_cookies(sb)
 
-                for idx, show in enumerate(all_shows, 1):
-                    self.custom_logger.info(f"[{idx}/{len(all_shows)}] [{show['category']}] {show['title']!r}")
-                    try:
-                        record = self._scrape_show(sb, show) # Fixed: Changed driver -> sb
-                        if record:
-                            all_data.append(record)
-                            self.log_record(record)
-                            self._log_show_summary(record)
-                    except Exception as exc:
-                        self.custom_logger.error(f"   Error: {exc}", exc_info=True)
+                show_links = self.get_show_links(sb)
 
-                    human_delay(*DELAY_BETWEEN_SHOWS)
+                if self.local_test:
+                    show_links = show_links[:self.show_count]
 
-                self.custom_logger.info(f"Extraction complete — {len(all_data)} record(s)")
-            finally:
-                pass # Fixed: SB handles closing browser context contextually. Explicit driver.quit() removed.
+                self._scrape_shows(sb, show_links, category)
 
-        return json.dumps(all_data, default=str).encode("utf-8")
+        return json.dumps(self.all_data, default=str).encode("utf-8")
 
-    def _parse(self, raw: bytes) -> pd.DataFrame:
-        data = json.loads(raw.decode("utf-8"))
-        df = pd.DataFrame(data)
-        if not df.empty and "capacity" in df.columns:
-            if df["capacity"].notna().any():
-                df["capacity"] = df["capacity"].astype(pd.Int64Dtype())
-        self.custom_logger.info(f"Parsed {len(df)} record(s)")
-        return df
-    
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        if not df.empty and "is_limited_run" in df.columns:
-            df["is_limited_run"] = None
-        if not df.empty and "capacity" in df.columns:
-            df["capacity"] = pd.to_numeric(df["capacity"], errors="coerce").astype("Int64")
+    def _parse(self, _raw: bytes):
+        df = pd.DataFrame(self.all_data)
         return df
 
 
 def main():
-    extractor = CircleOnlineExtractor(
+    extractor = CurveOnlineExtractor(
         save_csv_locally=False, 
         csv_incremental_mode=False
     )
     result = extractor.run()
-    logger.info("Extraction result: %s", result)
+    if result.get("status") != "success":
+        sys.exit(1)
 
 
 if __name__ == "__main__":
