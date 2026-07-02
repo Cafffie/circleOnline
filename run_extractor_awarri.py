@@ -77,7 +77,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         except Exception:
             pass
 
-    def get_links(self, sb, xpath):
+    def get_show_links(self, sb, xpath):
         elements = sb.find_elements(By.XPATH, xpath)
         return [e.get_attribute("href") for e in elements if e.get_attribute("href")]
 
@@ -308,8 +308,9 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         self.custom_logger.info("-" * 50)
 
         sb.execute_script(
-            "document.querySelector('button[aria-label*=\"Book Tickets\"]').click();"
+            "document.querySelector('a[href*="/book/"]').click();"
         )
+
         human_delay(10, 12.5)
         human_scroll(sb)
         time.sleep(3)
@@ -330,7 +331,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             
         seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(sb, performances)
 
-        venue =  venue_details["venue"]
+        venue_name =  venue_details["venue"]
         address = venue_details["address"]
         city = venue_details["city"]
         country = normalize_country(venue_details["country"])
@@ -352,9 +353,9 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             "category": category,
             "venue": venue_name,
             "venue_url": venue_url,
-            "address": venue_details["address"]
-            "city": venue_details["city"]
-            "country": normalize_country(venue_details["country"]),
+            "address":address,
+            "city": city,
+            "country": country,
             "open_date": open_date,
             "close_date": close_date,
             "booking_start_date": open_date,
