@@ -106,6 +106,7 @@ class CurveOnlineExtractor(BaseExtractor):
     def _get_terminal_dates(self, sb) -> str | None: # Fixed type hinting hint to match output tuple
         """Extract show header dates."""
         try:
+            # Mon 13 - Sat 18 Jul 2026
             terminal_date = sb.get_text("header.flush--right .show__date")
             return terminal_date.strip() if terminal_date else None
         except Exception as e:
@@ -177,7 +178,7 @@ class CurveOnlineExtractor(BaseExtractor):
                     performances.append({
                         "date": date_ymd,
                         "time": time_hm,  
-                        "booking_url": booking_url
+                        "booking_url": ("" if "tel" in booking_url else booking_url)
                     })
                     seen_urls.add(booking_url)
 
@@ -197,6 +198,7 @@ class CurveOnlineExtractor(BaseExtractor):
         seat_list = []
 
         try:
+            sb.wait_for_element_present("div.SeatingArea img, rect.seat", timeout=12)
             seats = sb.find_elements(By.CSS_SELECTOR, "div.SeatingArea img[class*='Seat'], rect.seat")
             self.custom_logger.info(f" Found {len(seats)} unique seats. ")
 
@@ -244,18 +246,17 @@ class CurveOnlineExtractor(BaseExtractor):
             if not key:
                 continue
 
-            
-            
             self.custom_logger.info(f" [{i}/{len(performances)}] Seats for {perf['date']} {perf['time']}")
 
+            # Confirm if sold out
+            if not self.safe_get(sb, perf["booking_url"]):
+                self.custom_logger.info(f"Performance {perf_key} is sold out or seatmap is unavailable.")
+                seat_pricing[key] = []
+                continue
+
             try:
-                # Confirm if sold out
-                if not self.safe_get(sb, perf["booking_url"]):
-                    self.custom_logger.info(f"Performance {perf_key} is sold out.")
-                    seat_pricing[key] = []
-                    continue
-                    
-                    human_delay(4, 5.5)
+                self.safe_get(sb, perf["booking_url"])
+                human_delay(4, 5.5)
 
                 if sb.is_element_present("#SpektrixIFrame"):
                     sb.switch_to_frame("#SpektrixIFrame")
@@ -263,10 +264,9 @@ class CurveOnlineExtractor(BaseExtractor):
                     # --- SINGLE-PASS ADDRESS EXTRACTION ---
                     if not venue_extracted:
                         venue_details = self._get_theatre_address(sb)
-
                         venue_extracted = True
                     # ------------------------------------------------
-                    sb.wait_for_element_present("div.SeatingArea img, rect.seat", timeout=12)
+                    
                     if sb.is_element_present("div.SeatingArea img, rect.seat"):
                         seat_list, currency, capacity = self.extract_seats(sb)
                         if seat_list:
@@ -355,18 +355,7 @@ class CurveOnlineExtractor(BaseExtractor):
             self.custom_logger.warning(
                 "  Open date %s is after close date %s. Adjusting open date to performance.",)
             open_date = sorted_dates[0]
-        
-        if open_date > first_perf_date:
-            self.custom_logger.warning(
-                "  Open date %s is after first performance date %s. Adjusting open date to performance.",)
-            open_date = first_perf_date
-
-        if close_date < last_perf_date:
-            self.custom_logger.warning(
-                "  Close date %s is before last performance date %s. Adjusting close date to performance.",)
-            close_date = last_perf_date
-
-            
+     
         seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(sb, performances)
 
         venue_url = sb.get_current_url()
