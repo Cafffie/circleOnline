@@ -1,10 +1,11 @@
-"""Belfast Grand Opera House extractor implementation using the framework."""
+"""Curve Online extractor implementation using the framework."""
 import json
 import random
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, date
+from dateutil import parser
 
 import pandas as pd
 from selenium.webdriver.common.by import By
@@ -21,25 +22,27 @@ from utils.scraping_helpers import (
     human_scroll,
     parse_booking_dates,
     standardize_category,
+    normalize_country,
+    convert_to_24hr,
+    format_datetime_key,
 )
 
-from .belfast_grand_opera_house_config import (
+from .curve_online_config import (
 DEFAULT_THEATRE_DETAILS,
 COOKIE_BTN_XPATH,
 PAGES,
-BASE_URLS,
 DEFAULT_CURRENCY, 
 SELECTORS)
 
 logger = setup_logger(__name__, log_to_file=False)
 
 
-class BelfastGrandOperaHouseExtractor(BaseExtractor):
-    """Extractor for Belfast Grand Opera House website."""
+class CurveOnlineExtractor(BaseExtractor):
+    """Extractor for Curve Online website."""
 
     def __init__(self, local_test=False, show_count=2, **kwargs):
         super().__init__(
-            site_id="belfast_grand_opera_house",
+            site_id="curve_online",
             log_to_file=False,
             log_to_terminal=True,
             local_test=local_test,
@@ -50,7 +53,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
 
     def safe_get(self, sb, url, wait=10):
         try:
-            self.custom_logger.info("Loading URL: %s", url)
+            #self.custom_logger.info("Loading URL: %s", url)
             sb.uc_open_with_reconnect(url, reconnect_time=wait if wait > 4 else 4)
             if (
                 "captcha" in sb.get_current_url().lower()
@@ -77,64 +80,100 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         except Exception:
             pass
 
-    def get_pagination_links(self, sb):
-        pages = sb.find_elements(SELECTORS["pagination_link"])
-        links = []
-        for p in pages:
-            link = p.get_attribute("href")
-            page_number = p.get_attribute("data-number")
-            if link:
-                links.append((page_number, link))
-        return links
 
-    def get_links(self, sb, xpath):
-        elements = sb.find_elements(By.XPATH, xpath)
+    def _parse_date(self, text: str) -> date | None:
+        try:
+            dt = parser.parse(text, dayfirst=True, fuzzy=True)
+            if dt.date() < date.today():
+                dt = dt.replace(year=dt.year + 1)
+            return dt.strftime("%Y-%m-%d")
+        except Exception as e:
+            self.custom_logger.error(f"_parse_date failed for '{text}': {e}")
+            return None
+
+    def parse_open_close_dates(self, text: str):
+        # strptime expects "Sep", not "Sept"
+        #text = text.replace("Sept", "Sep")
+
+        # Convert DD/MM/YYYY -> DD Mon YYYY
+        def _uk_numeric_to_named(m):
+            try:
+                return date(
+                    int(m.group(3)),   # year
+                    int(m.group(2)),   # month
+                    int(m.group(1)),   # day
+                ).strftime("%d %b %Y")
+            except ValueError:
+                return m.group(0)
+
+        text = re.sub(
+            r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b",
+            _uk_numeric_to_named,
+            text,
+        )
+
+        # Mon 13 Sep 2026 - Sat 18 Jul 2027
+        m = re.match(
+            r"\w+\s+(\d{1,2})\s+([A-Za-z]{3,4})\s+(\d{4})\s*-\s*"
+            r"\w+\s+(\d{1,2})\s+([A-Za-z]{3,4})\s+(\d{4})",
+            text,
+        )
+        if m:
+            d1, m1, y1, d2, m2, y2 = m.groups()
+            open_date = datetime.strptime(f"{d1} {m1} {y1}", "%d %b %Y").date()
+            close_date = datetime.strptime(f"{d2} {m2} {y2}", "%d %b %Y").date()
+            return open_date.isoformat(), close_date.isoformat()
+
+        # Mon 13 - Sat 18 Jul 2026
+        m = re.match(
+            r"\w+\s+(\d{1,2})\s*-\s*"
+            r"\w+\s+(\d{1,2})\s+([A-Za-z]{3,4})\s+(\d{4})",
+            text,
+        )
+        if m:
+            d1, d2, month, year = m.groups()
+            open_date = datetime.strptime(f"{d1} {month} {year}", "%d %b %Y").date()
+            close_date = datetime.strptime(f"{d2} {month} {year}", "%d %b %Y").date()
+            return open_date.isoformat(), close_date.isoformat()
+
+        # Sat 4 Jul 2026
+        m = re.match(r"\w+\s+(\d{1,2})\s+([A-Za-z]{3,4})\s+(\d{4})", text)
+        if m:
+            day, month, year = m.groups()
+            d = datetime.strptime(f"{day} {month} {year}", "%d %b %Y").date()
+            return d.isoformat(), d.isoformat()
+
+        return None, None
+
+
+    def get_show_links(self, sb):
+        elements = sb.find_elements(By.CSS_SELECTOR, "article.listing__item a")
         return [e.get_attribute("href") for e in elements if e.get_attribute("href")]
 
     def _get_show_title(self, sb) -> str | None:
         """Extract show title."""
         try:
-            return sb.get_text"h2.media__title").strip() or None
+            return sb.get_text("header.flush--right h1.major-title").strip() or None
         except Exception:
             return None
             
     def _get_terminal_dates(self, sb) -> str | None: # Fixed type hinting hint to match output tuple
         """Extract show header dates."""
         try:
-            terminal_date = sb.get_text("article.listing__item show__date")
+            # Mon 13 - Sat 18 Jul 2026
+            terminal_date = sb.get_text("header.flush--right .show__date")
+            return terminal_date.strip() if terminal_date else None
         except Exception as e:
             self.custom_logger.debug(f" terminal date extraction failed: {e}", "warning")
             return None
-
-    def _get_theatre_address(self, sb) -> str | None: 
-        """Extract theatre venue address."""
-        try:
-            address = sb.find_element(".white-wrapper p.AreaAndVenueDetails").text.replace("\n", "")
-        except Exception as e:
-            self.custom_logger.warning(f" Address extraction failed, fallback to default: {e}", "warning")
-            return DEFAULT_THEATRE_DETAILS["address"]
-
-    def _get_theatre_venue(self, address) -> str | None: 
-        """Extract theatre venue from address."""
-        try:
-            if address:
-                # Theatre, Curve, 60 Rutland Street, Leicester, LE1 1SB
-                address_parts = address.split(",")
-                if len(address_parts) > 3
-                    curve = address_parts[1]
-                    theatre = address_parts[0]
-                    venue_string = f"{curve} {theatre}"
-                    venue = venue_string.strip() if "curve" in address.lower() else "Studio Theatre" 
-        except Exception as e:
-            self.custom_logger.warning(f" Venue extraction failed, fallback to default: {e}", "warning")
-            return DEFAULT_THEATRE_DETAILS["venue"]
 
     def _get_theatre_address(self, sb) -> dict:
         """Extract theatre address."""
         data = {}
         try:
-            address = sb.find_element(By.XPATH, SELECTORS["theatre_address"]).text.strip().replace("\n", "") # Fixed selector lookup strategy
+            address = sb.find_element(".white-wrapper p.AreaAndVenueDetails").text.replace("\n", "") 
             if address:
+                # Theatre, Curve, 60 Rutland Street, Leicester, LE1 1SB
                 data["address"] = address
                 parts = address.split(",")
                 curve = parts[1] if len(parts) > 1 else ""
@@ -144,55 +183,61 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
                 data["venue"] = venue_string.strip() if "curve" in address.lower() else "Studio Theatre"
                 
                 postcode = extract_postcode(address, region="UK")
-                city, country = get_city_country_uk(postcode)
-                data["city"] = city
-                data["country"] = country
+                if postcode:
+                  city, country = get_city_country_uk(postcode)
+                  data["city"] = city
+                  data["country"] = country
+            return data
 
         except Exception as e:
-            self.custom_logger.info(f" Address extraction failed: {e}", "warning")
+            self.custom_logger.info(f" Address extraction failed, fallback to default: {e}", "warning")
             return DEFAULT_THEATRE_DETAILS
     
 
     def _extract_performances(self, sb) -> list[dict]: 
         """Parses performance instances directly from Curve's single or continuous date markers."""
+        
         performances = []
+        seen_urls = set()
 
         try:
             year_element = sb.get_text( ".show__time, .show__date")
-            self.custom_logger.info(f" Year element found")
             year = year_element.strip().split(" ")[-1].strip()
         except Exception as e:
             year = str(datetime.now().year) 
-            self.custom_logger.info(f" Year parse error, Fallback to current year : {e}", "warning")
+            self.custom_logger.info(f" Year parse error, Fallback to current year : {e}")
                 
         try:
-            date_blocks = sb.find_elements(By.CSS_SELECTOR, "article.listing__info") # Fixed: db -> sb
+            date_blocks = sb.find_elements(By.CSS_SELECTOR, ".listing--info, article.listing__info")
             self.custom_logger.info(f" Found {len(date_blocks)} performance dates")
 
             for block in date_blocks:
-                booking_url = block.find_element(By.TAG_NAME, "a").get_attribute("href")
-                if not booking_url:
-                    continue
-                    
-                raw_date_text = block.find_element(By.CSS_SELECTOR, ".listing__date time").get_attribute("textContent").strip()
-                if not raw_date_text:
-                    continue
-                    
-                raw_time_text = block.find_element(By.CSS_SELECTOR, ".listing__time time").get_attribute("textContent").strip()
-                if not raw_time_text:
-                    continue
-                    
-                date_string = f"{raw_date_text} {year} {raw_time_text}"
-                parsed_dt = parser.parse(date_string)
+                try:
+                    booking_url = block.find_element(By.TAG_NAME, "a").get_attribute("href") 
+                    # Deduplicate based on unique performance booking URL
+                    if booking_url in seen_urls:
+                        continue
 
-                date_ymd = self._parse_date(date_string).strftime("%Y-%m-%d")
-                time_hm = convert_to_24hr(raw_time_text)
-          
-                performances.append({
-                    "date": date_ymd,
-                    "time": time_hm,  
-                    "booking_url": booking_url
-                })
+                    raw_date_text = block.find_element(By.CSS_SELECTOR, ".listing__date time").get_attribute("textContent").strip()
+                    raw_time_text = block.find_element(By.CSS_SELECTOR, ".listing__time time").get_attribute("textContent").strip()
+                    if not raw_date_text or not raw_time_text:
+                        continue
+                        
+                    date_string = f"{raw_date_text} {year} {raw_time_text}"
+                   
+                    date_ymd = self._parse_date(date_string)
+                    time_hm = convert_to_24hr(raw_time_text)
+                    
+                    performances.append({
+                        "date": date_ymd,
+                        "time": time_hm,  
+                        "booking_url": ("" if "tel" in booking_url else booking_url)
+                    })
+                    seen_urls.add(booking_url)
+
+                except Exception as inner_e:
+                    self.custom_logger.debug(f"Date block parsing failed due to inner error: {inner_e}")
+                    continue
 
         except Exception as e:
             self.custom_logger.debug(f" Error extracting performances: {e}")
@@ -200,10 +245,13 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
 
     def extract_seats(self, sb) -> tuple:
         """Extracts seats and pricing from the currently open SVG modal."""
+
         max_capacity = None
         currency = None
         seat_list = []
+
         try:
+            sb.wait_for_element_present("div.SeatingArea img, rect.seat", timeout=12)
             seats = sb.find_elements(By.CSS_SELECTOR, "div.SeatingArea img[class*='Seat'], rect.seat")
             self.custom_logger.info(f" Found {len(seats)} unique seats. ")
 
@@ -244,6 +292,8 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         venue_extracted = False
         seat_pricing = {}
 
+        capacity = None
+        currency = None
         encountered_no_seatmap = False
         
         for i, perf in enumerate(performances, start=1):
@@ -251,36 +301,42 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             if not key:
                 continue
 
-            # Confirm if sold out
-            if not self.safe_get(sb, perf["booking_url"])
+            self.custom_logger.info(f" [{i}/{len(performances)}] Seats for {perf['date']} {perf['time']}")
+
+            # Skip phone-only bookings or empty booking URLs immediately
+            if not perf["booking_url"]:
+                self.custom_logger.info(f"Performance {key} has no digital booking URL (likely telephone booking).")
                 seat_pricing[key] = []
                 continue
-            
-            self.custom_logger.info(f" [{i}/{len(performances)}] {perf['date']} {perf['time']}")
 
             try:
-                self.safe_get(sb, perf["booking_url"])
-                human_delay(5, 6.5)
+                if not self.safe_get(sb, perf["booking_url"]):
+                    self.custom_logger.info(f"Performance {key} is sold out or page failed to load.")
+                    seat_pricing[key] = []
+                    continue
+                human_delay(4, 5.5)
 
-                sb.wait_for_element_present("SpektrixIFrame", timeout=12)
-                iframes = sb.find_elements(By.ID, "SpektrixIFrame")
-                if iframes:
-                    iframe = iframes[0]
-                    sb.switch_to.frame(iframe)
-                    
+                if sb.is_element_present("#SpektrixIFrame"):
+                    sb.switch_to_frame("#SpektrixIFrame")
+
                     # --- SINGLE-PASS ADDRESS EXTRACTION ---
                     if not venue_extracted:
-                        venue_details = self._get_theatre_address(sb) 
+                        venue_details = self._get_theatre_address(sb)
                         venue_extracted = True
                     # ------------------------------------------------
-
-                    sb.wait_for_element_present("div.SeatingArea img, rect.seat", timeout=12)
-                    seat_list, currency, capacity = self.extract_seats(sb)
-
-                    if seat_list:
-                        seat_pricing[key] = seat_list  
+                    
+                    if sb.is_element_present("div.SeatingArea img, rect.seat"):
+                        seat_list, perf_currency, perf_capacity = self.extract_seats(sb)
+                        if seat_list:
+                            seat_pricing[key] = seat_list
+                            currency = perf_currency
+                            capacity = perf_capacity 
+                        self.custom_logger.info(f" Seats: {len(seat_list)} | Capacity: {capacity} | Currency: {currency}")
+                    else:
+                        seat_pricing[key] = []
+                        encountered_no_seatmap = True  
+                        self.custom_logger.info(f" No seat map available for {perf['date']} {perf['time']}")
                 
-                    self.custom_logger.info(f" {len(seat_list)} seats extracted")
                 else:
                     seat_pricing[key] = []
                     encountered_no_seatmap = True  
@@ -297,7 +353,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
                 except:
                     pass
 
-            human_delay(*DELAY_BETWEEN_PERFS)
+            human_delay(5, 7)
 
         if encountered_no_seatmap and all(len(seat_list) == 0 for seat_list in seat_pricing.values()):
             self.custom_logger.info(" All performances lack a seat map layout. Resetting seat_pricing = {}")
@@ -306,7 +362,6 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         self.custom_logger.info(" Seat extraction flow processed")
         return seat_pricing, currency, capacity, venue_details
 
-         
 
     def _scrape_one_show(self, sb, show_url: str, category: str) -> dict | None:
         """Scrape a single show page end-to-end.
@@ -314,45 +369,35 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
         Returns a completed row dict on success, or None if the show page
         did not render (bot challenge, timeout) — the caller retries.
         """
+        
         if not self.safe_get(sb, show_url):
             return None
-
-        self.accept_cookies(sb)
-        human_delay(2, 4)
 
         title = self._get_show_title(sb)
         if not title:
             self.custom_logger.warning("No title found for: %s", show_url)
 
+        open_date = None
+        close_date = None
         terminal_date = self._get_terminal_dates(sb)
-        if terminal_date:
-            booking_dates = parse_booking_dates(terminal_date)
-            open_date = booking_dates.get("start_date")
-            close_date = booking_dates.get("end_date")
+        if terminal_date: 
+            #booking_dates = parse_booking_dates(terminal_date)
+            open_date, close_date = self.parse_open_close_dates(terminal_date)
+            #open_date = booking_dates.get("start_date")
+            #close_date = booking_dates.get("end_date")
         
-        address = self._get_theatre_address(sb)
-        venue_url = sb.get_current_url()
-        venue_name =  self._get_theatre_venue(sb, address)
-        self.custom_logger.info("Venue name: %s", venue_name)
-        self.custom_logger.info("Venue address: %s", address)
-        if address:
-            postcode = extract_postcode(address, region="UK")
-            city, country = get_city_country_uk(postcode)
-       
+        self.accept_cookies(sb)
+        human_delay(2, 4)
+
         self.custom_logger.info("Category: %s", category)
         self.custom_logger.info("Title: %s", title)
         self.custom_logger.info("Terminal: %s", terminal_date)
-        self.custom_logger.info("Venue: %s", venue_name)
-        self.custom_logger.info("Address: %s", address)
-        self.custom_logger.info("City: %s", city)
-        self.custom_logger.info("Country: %s", country)
+        
         self.custom_logger.info("Open Date: %s", open_date)
         self.custom_logger.info("Close Date: %s", close_date)
         self.custom_logger.info("-" * 50)
 
-        sb.execute_script(
-            "document.querySelector('a[href*="/book/"]').click();"
-        )
+        #sb.execute_script("document.querySelector('a[href*=\"/book/\"]').click();")
 
         human_delay(10, 12.5)
         human_scroll(sb)
@@ -360,25 +405,40 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
 
         performances = self._extract_performances(sb)
         if not performances:
-            self.custom_logger.warning(
-                f"  No performances found for '{show['title']}', skipping"
-            )
+            self.custom_logger.warning(f"  No performances found for '{title}', skipping")
             return None
-        if performances:
-            sorted_dates = sorted([p["date"] for p in performances])
-            if not open_date or open_date > close_date:
+       
+        sorted_dates = sorted([p["date"] for p in performances])
+        first_perf_date = sorted_dates[0]
+        last_perf_date = sorted_dates[-1]
+        if not open_date: # or open_date > close_date
             open_date = sorted_dates[0]
             
-            if not close_date:
+        if not close_date:
             close_date = sorted_dates[-1]
-            
+
+        if open_date > close_date:
+            self.custom_logger.warning(
+                "  Open date %s is after close date %s. Adjusting open date to performance.",)
+            open_date = sorted_dates[0]
+     
         seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(sb, performances)
-        
+
+        venue_url = sb.get_current_url()
+        venue_name =  venue_details["venue"]
+        address = venue_details["address"]
+        city = venue_details["city"]
+        country = normalize_country(venue_details["country"])
+      
         self.custom_logger.info(
             "Performances: %d | Seat keys: %d",
             len(performances),
             len(seat_pricing),
         )
+        self.custom_logger.info("Venue: %s", venue_name)
+        self.custom_logger.info("Address: %s", address)
+        self.custom_logger.info("City: %s", city)
+        self.custom_logger.info("Country: %s", country)
         self.custom_logger.info("Capacity: %s", capacity)
         self.custom_logger.info("Currency: %s", currency)
 
@@ -387,9 +447,9 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             "category": category,
             "venue": venue_name,
             "venue_url": venue_url,
-            "address": venue_details["address"]
-            "city": venue_details["city"]
-            "country": normalize_country(venue_details["country"]),
+            "address":address,
+            "city": city,
+            "country": country,
             "open_date": open_date,
             "close_date": close_date,
             "booking_start_date": open_date,
@@ -401,7 +461,7 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             "capacity": capacity,
             "currency": currency or DEFAULT_CURRENCY,
             "is_limited_run": None,
-            "scrape_datetime": get_scrape_datetime(),
+            "scrape_datetime": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
 
     def _scrape_shows(self, sb, show_links: list, category: str) -> None:
@@ -464,10 +524,11 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
             chromium_arg="--enable-features=TranslateUI",
         ) as sb:
             self.custom_logger.info(
-                "Starting extraction from Belfast Grand Opera House"
+                "Starting extraction from Curve Online"
             )
 
-            for url in BASE_URLS:
+            for i, (url, category) in enumerate(PAGES):
+                self.custom_logger.info(f"[Listing] {category}: {url}")
                 if not self.safe_get(sb, url):
                     continue
 
@@ -475,28 +536,15 @@ class BelfastGrandOperaHouseExtractor(BaseExtractor):
                 sb.maximize_window()
                 self.accept_cookies(sb)
 
-                category = standardize_category(
-                    "drama" if "drama" in url.lower() else "musical"
-                )
-                self.custom_logger.info("Category: %s", category)
+                show_links = self.get_show_links(sb)
 
-                links = self.get_pagination_links(sb)
-                pages = links if links else [(1, sb.get_current_url())]
+                if self.local_test:
+                    self.custom_logger.info(
+                        "LOCAL TEST MODE: Limiting to %s shows", self.show_count
+                    )
+                    show_links = show_links[: self.show_count]
 
-                for _, link in pages:
-                    self.safe_get(sb, link)
-                    human_delay(7, 8.5)
-                    self.accept_cookies(sb)
-
-                    show_links = self.get_links(sb, SELECTORS["show_links"])
-
-                    if self.local_test:
-                        self.custom_logger.info(
-                            "LOCAL TEST MODE: Limiting to %s shows", self.show_count
-                        )
-                        show_links = show_links[: self.show_count]
-
-                    self._scrape_shows(sb, show_links, category)
+                self._scrape_shows(sb, show_links, category)
 
         return json.dumps(self.all_data, default=str).encode("utf-8")
 
