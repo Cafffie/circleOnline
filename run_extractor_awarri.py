@@ -314,6 +314,8 @@ class CurveOnlineExtractor(BaseExtractor):
         if not title:
             self.custom_logger.warning("No title found for: %s", show_url)
 
+        venue_url = sb.get_current_url()
+
         terminal_date = self._get_terminal_dates(sb)
         if terminal_date:
             booking_dates = parse_booking_dates(terminal_date)
