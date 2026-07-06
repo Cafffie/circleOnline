@@ -9,6 +9,8 @@ RETRY_DELAY = (2, 4)
 PAGES = [
     (f"{BASE_URL}whats-on/?genre-filter=musical", "Musical"),
     (f"{BASE_URL}whats-on/?genre-filter=drama", "Play"),
+    (f"{BASE_URL}whats-on/?genre-filter=family", "Play"),
+    (f"{BASE_URL}whats-on/?genre-filter=children-and-young-peoples-theatre", "Play")
 ]
 
 COOKIE_BTN_XPATH = (
