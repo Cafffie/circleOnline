@@ -1,4 +1,4 @@
-"""Curve Online extractor implementation using the framework."""
+"""Leicester Curve extractor implementation using the framework."""
 import json
 import random
 import re
@@ -13,21 +13,21 @@ from seleniumbase import SB
 
 from utils.base_extractor import BaseExtractor
 from utils.logger import setup_logger
-from utils.scraping_helpers import (  
-    get_scrape_datetime,
-    parse_booking_dates, 
-    standardize_category,
+from utils.scraping_helpers import (
     convert_to_24hr,
     extract_postcode,
     format_datetime_key,
     get_city_country_uk,
     get_currency_from_price,
+    get_scrape_datetime,
     human_delay,
     human_scroll,
     normalize_country,
+    parse_booking_dates,
+    standardize_category,
 )
 
-from .curve_online_config import (  # COOKIE_BTN_XPATH,
+from .leicester_curve_config import (  # COOKIE_BTN_XPATH,
     DEFAULT_CURRENCY,
     DEFAULT_THEATRE_DETAILS,
     PAGES,
@@ -37,12 +37,12 @@ from .curve_online_config import (  # COOKIE_BTN_XPATH,
 logger = setup_logger(__name__, log_to_file=False)
 
 
-class CurveOnlineExtractor(BaseExtractor):
-    """Extractor for Curve Online website."""
+class LeicesterCurveExtractor(BaseExtractor):
+    """Extractor for the Leicester Curve website."""
 
     def __init__(self, local_test=False, show_count=2, **kwargs):
         super().__init__(
-            site_id="curve_online",
+            site_id="leicester_curve",
             log_to_file=False,
             log_to_terminal=True,
             local_test=local_test,
@@ -89,59 +89,6 @@ class CurveOnlineExtractor(BaseExtractor):
         except Exception as e:
             self.custom_logger.error(f"_parse_date failed for '{text}': {e}")
             return None
-
-    def parse_open_close_dates(self, text: str):
-        # strptime expects "Sep", not "Sept"
-        # text = text.replace("Sept", "Sep")
-
-        # Convert DD/MM/YYYY -> DD Mon YYYY
-        def _uk_numeric_to_named(m):
-            try:
-                return date(
-                    int(m.group(3)),  # year
-                    int(m.group(2)),  # month
-                    int(m.group(1)),  # day
-                ).strftime("%d %b %Y")
-            except ValueError:
-                return m.group(0)
-
-        text = re.sub(
-            r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b",
-            _uk_numeric_to_named,
-            text,
-        )
-
-        # Mon 13 Sep 2026 - Sat 18 Jul 2027
-        m = re.match(
-            r"\w+\s+(\d{1,2})\s+([A-Za-z]{3,4})\s+(\d{4})\s*-\s*"
-            r"\w+\s+(\d{1,2})\s+([A-Za-z]{3,4})\s+(\d{4})",
-            text,
-        )
-        if m:
-            d1, m1, y1, d2, m2, y2 = m.groups()
-            open_date = datetime.strptime(f"{d1} {m1} {y1}", "%d %b %Y").date()
-            close_date = datetime.strptime(f"{d2} {m2} {y2}", "%d %b %Y").date()
-            return open_date.isoformat(), close_date.isoformat()
-
-        # Mon 13 - Sat 18 Jul 2026
-        m = re.match(
-            r"\w+\s+(\d{1,2})\s*-\s*" r"\w+\s+(\d{1,2})\s+([A-Za-z]{3,4})\s+(\d{4})",
-            text,
-        )
-        if m:
-            d1, d2, month, year = m.groups()
-            open_date = datetime.strptime(f"{d1} {month} {year}", "%d %b %Y").date()
-            close_date = datetime.strptime(f"{d2} {month} {year}", "%d %b %Y").date()
-            return open_date.isoformat(), close_date.isoformat()
-
-        # Sat 4 Jul 2026
-        m = re.match(r"\w+\s+(\d{1,2})\s+([A-Za-z]{3,4})\s+(\d{4})", text)
-        if m:
-            day, month, year = m.groups()
-            d = datetime.strptime(f"{day} {month} {year}", "%d %b %Y").date()
-            return d.isoformat(), d.isoformat()
-
-        return None, None
 
     def get_show_links(self, sb):
         elements = sb.find_elements(By.CSS_SELECTOR, SELECTORS["shows_link"])
@@ -209,15 +156,6 @@ class CurveOnlineExtractor(BaseExtractor):
         seen_urls = set()
 
         try:
-            year_element = sb.get_text(SELECTORS["year"])
-            year = year_element.strip().split(" ")[-1].strip()
-        except Exception as e:
-            year = str(datetime.now().year)
-            self.custom_logger.info(
-                f" Year parse error, Fallback to current year : {e}"
-            )
-
-        try:
             date_blocks = sb.find_elements(By.CSS_SELECTOR, SELECTORS["date_blocks"])
             self.custom_logger.info(f" Found {len(date_blocks)} performance dates")
 
@@ -243,6 +181,7 @@ class CurveOnlineExtractor(BaseExtractor):
                     if not raw_date_text or not raw_time_text:
                         continue
 
+                    year = str(datetime.now().year)
                     date_string = f"{raw_date_text} {year} {raw_time_text}"
 
                     date_ymd = self._parse_date(date_string)
@@ -431,7 +370,7 @@ class CurveOnlineExtractor(BaseExtractor):
 
         venue_url = sb.get_current_url()
         self.custom_logger.info("venue_url: %s", venue_url)
-        
+
         open_date, close_date = None, None
         terminal_date = self._get_terminal_dates(sb)
         if terminal_date:
@@ -516,7 +455,7 @@ class CurveOnlineExtractor(BaseExtractor):
             "capacity": capacity,
             "currency": currency or DEFAULT_CURRENCY,
             "is_limited_run": None,
-            "scrape_datetime": get_scrape_datetime() #datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "scrape_datetime": get_scrape_datetime(),  # datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
 
     def _scrape_shows(self, sb, show_links: list, category: str) -> None:
@@ -569,6 +508,7 @@ class CurveOnlineExtractor(BaseExtractor):
     def extract(self) -> bytes:
         """Open SB session, scrape all shows, populate self.all_data, return JSON bytes."""
         self.all_data = []
+        seen_links = set()
 
         with SB(
             uc=True,
@@ -578,7 +518,7 @@ class CurveOnlineExtractor(BaseExtractor):
             locale="en-US",
             chromium_arg="--enable-features=TranslateUI",
         ) as sb:
-            self.custom_logger.info("Starting extraction from Curve Online")
+            self.custom_logger.info("Starting extraction from Leicester Curve")
 
             for i, (url, category) in enumerate(PAGES):
                 self.custom_logger.info(f"[Listing] {category}: {url}")
@@ -590,6 +530,14 @@ class CurveOnlineExtractor(BaseExtractor):
                 self.accept_cookies(sb)
 
                 show_links = self.get_show_links(sb)
+
+                unique_links = []
+                for link in show_links:
+                    if link not in seen_links:
+                        seen_links.add(link)
+                        unique_links.append(link)
+
+                show_links = unique_links
 
                 if self.local_test:
                     self.custom_logger.info(
@@ -609,8 +557,10 @@ class CurveOnlineExtractor(BaseExtractor):
 
 
 def main():
-    """Example usage of the Curve Online extractor."""
-    extractor = CurveOnlineExtractor(save_csv_locally=False, csv_incremental_mode=False)
+    """Example usage of the Leicester Curve extractor."""
+    extractor = LeicesterCurveExtractor(
+        save_csv_locally=False, csv_incremental_mode=False
+    )
     result = extractor.run()
     logger.info(f"Extraction result: {result}")
     if result.get("status") != "success":
