@@ -97,9 +97,14 @@ class LeicesterCurveExtractor(BaseExtractor):
     def _get_show_title(self, sb) -> str | None:
         """Extract show title."""
         try:
-            return sb.get_text(SELECTORS["title"]).strip() or None
+            title = sb.get_text(SELECTORS["title"]).strip()
+            return self.clean_title(title) or None
         except Exception:
             return None
+
+    def clean_title(self, title: str):
+        """Remove \n from title."""
+        return title.replace("\n", " ").strip() if title else None
 
     def _get_terminal_dates(
         self, sb
