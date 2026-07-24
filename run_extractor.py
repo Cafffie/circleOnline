@@ -158,7 +158,7 @@ class LeicesterCurveExtractor(BaseExtractor):
         """Parses performance instances directly from Curve's single or continuous date markers."""
 
         performances = []
-        seen_urls = set()
+        # seen_urls = set()
 
         try:
             date_blocks = sb.find_elements(By.CSS_SELECTOR, SELECTORS["date_blocks"])
@@ -170,8 +170,8 @@ class LeicesterCurveExtractor(BaseExtractor):
                         By.TAG_NAME, SELECTORS["booking_url"]
                     ).get_attribute("href")
                     # Deduplicate based on unique performance booking URL
-                    if booking_url in seen_urls:
-                        continue
+                    # if booking_url in seen_urls:
+                    # continue
 
                     raw_date_text = (
                         block.find_element(By.CSS_SELECTOR, SELECTORS["raw_date_text"])
@@ -200,7 +200,7 @@ class LeicesterCurveExtractor(BaseExtractor):
                             # "booking_url": booking_url
                         }
                     )
-                    seen_urls.add(booking_url)
+                    # seen_urls.add(booking_url)
 
                 except Exception as inner_e:
                     self.custom_logger.debug(
@@ -401,6 +401,7 @@ class LeicesterCurveExtractor(BaseExtractor):
         time.sleep(3)
 
         performances = self._extract_performances(sb)
+
         if not performances:
             self.custom_logger.warning(
                 f"  No performances found for '{title}', skipping"
@@ -423,6 +424,13 @@ class LeicesterCurveExtractor(BaseExtractor):
         seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(
             sb, performances
         )
+        # Filter performances using seatpricing
+
+        performances = [
+            p
+            for p in performances
+            if format_datetime_key(p["date"], p["time"]) in seat_pricing
+        ]
 
         venue_name = venue_details["venue"]
         address = venue_details["address"]
@@ -535,6 +543,7 @@ class LeicesterCurveExtractor(BaseExtractor):
                 self.accept_cookies(sb)
 
                 show_links = self.get_show_links(sb)
+                # show_links = ["https://www.curveonline.co.uk/whats-on/shows/tales-from-acorn-wood/"]
 
                 unique_links = []
                 for link in show_links:
