@@ -4,7 +4,7 @@ import random
 import re
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 from dateutil import parser
@@ -400,13 +400,21 @@ class LeicesterCurveExtractor(BaseExtractor):
         human_scroll(sb)
         time.sleep(3)
 
-        performances = self._extract_performances(sb)
+        scrape_datetime = get_scrape_datetime()
+        scrape_dt = parser.parse(scrape_datetime)
 
+        performances = self._extract_performances(sb)
         if not performances:
             self.custom_logger.warning(
                 f"  No performances found for '{title}', skipping"
             )
             return None
+
+        performances = [
+            p
+            for p in performances
+            if parser.parse(f"{p['date']} {p['time']}") - timedelta(hours=3) >= scrape_dt
+        ]
 
         sorted_dates = sorted([p["date"] for p in performances])
         if not open_date:  # or open_date > close_date
@@ -424,13 +432,7 @@ class LeicesterCurveExtractor(BaseExtractor):
         seat_pricing, currency, capacity, venue_details = self.extract_seat_metrics(
             sb, performances
         )
-        # Filter performances using seatpricing
-
-        performances = [
-            p
-            for p in performances
-            if format_datetime_key(p["date"], p["time"]) in seat_pricing
-        ]
+        
 
         venue_name = venue_details["venue"]
         address = venue_details["address"]
@@ -468,7 +470,7 @@ class LeicesterCurveExtractor(BaseExtractor):
             "capacity": capacity,
             "currency": currency or DEFAULT_CURRENCY,
             "is_limited_run": None,
-            "scrape_datetime": get_scrape_datetime(),  # datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "scrape_datetime": get_scrape_datetime(),  
         }
 
     def _scrape_shows(self, sb, show_links: list, category: str) -> None:
@@ -542,8 +544,8 @@ class LeicesterCurveExtractor(BaseExtractor):
                 sb.maximize_window()
                 self.accept_cookies(sb)
 
-                show_links = self.get_show_links(sb)
-                # show_links = ["https://www.curveonline.co.uk/whats-on/shows/tales-from-acorn-wood/"]
+                #show_links = self.get_show_links(sb)
+                show_links = ["https://www.curveonline.co.uk/whats-on/shows/tales-from-acorn-wood/"]
 
                 unique_links = []
                 for link in show_links:
